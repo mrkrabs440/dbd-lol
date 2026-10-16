@@ -1,0 +1,99 @@
+'use strict';
+
+// ===========================================================================
+// 게임 공용 상수 정의
+// ---------------------------------------------------------------------------
+// 서버(roomManager)와 클라이언트가 공유하는 규칙값입니다. 클라이언트는 서버가
+// match:found 패킷에 담아 보내는 설정을 신뢰 원본(source of truth)으로 사용합니다.
+// ===========================================================================
+
+// --- 매치 구성 ---
+const MATCH_SIZE = Number.parseInt(process.env.MATCH_SIZE, 10) || 4;
+const SURVIVORS_PER_MATCH =
+  Number.parseInt(process.env.SURVIVORS_PER_MATCH, 10) || 3;
+const KILLERS_PER_MATCH = Number.parseInt(process.env.KILLERS_PER_MATCH, 10) || 1;
+
+// --- 역할 ---
+const ROLES = Object.freeze({
+  KILLER: 'killer',
+  SURVIVOR: 'survivor',
+});
+
+// --- 생존자 체력 상태 머신 ---
+// healthy(건강) → injured(부상) → dying(빈사) → dead(사망)
+// 처치(hit) 1회: healthy → injured
+// 처치 2회: injured → dying
+// 처치 3회(또는 빈사 상태 추가 타격): dying → dead
+const HEALTH_STATES = Object.freeze({
+  HEALTHY: 'healthy',
+  INJURED: 'injured',
+  DYING: 'dying',
+  DEAD: 'dead',
+});
+
+// --- 발전기 ---
+const GENERATORS_PER_MATCH =
+  Number.parseInt(process.env.GENERATORS_PER_MATCH, 10) || 3;
+const REPAIR_RATE_PER_SEC = 5; // 초당 5% (요구 명세)
+const REPAIR_TICK_MS = 100; // 서버 검증 틱 간격
+
+// --- 이동/전투 ---
+const SURVIVOR_SPEED = 4; // 클라이언트 기준(단위/초)
+const KILLER_SPEED_MULTIPLIER = 1.25; // 살인마 이동 속도 배수
+const ATTACK_RANGE = 4; // 공격 사거리(요구 명세: Raycaster 4)
+const ATTACK_COOLDOWN_MS = 2500; // 공격 쿨다운
+const INTERACT_RANGE = 3; // 상호작용(수리) 사거리
+
+// --- 맵 경계 (서버 측 위치 검증) ---
+const MAP_HALF_EXTENT = 30; // -30 ~ +30 (60x60)
+const MAP_MIN_Y = -1;
+const MAP_MAX_Y = 8;
+
+// --- 매치 상태 ---
+const MATCH_STATES = Object.freeze({
+  WAITING: 'waiting', // 인원 대기
+  COUNTDOWN: 'countdown', // 카운트다운
+  PLAYING: 'playing', // 진행 중
+  ENDED: 'ended', // 종료
+});
+
+// --- 발전기 고정 좌표 (x, z) — 서버가 배치를 결정 ---
+const GENERATOR_POSITIONS = [
+  { x: -18, y: 0, z: -18 },
+  { x: 18, y: 0, z: -18 },
+  { x: 0, y: 0, z: 18 },
+];
+
+// --- 탈출구(게이트) 좌표. 모든 발전기 완료 시 개방 ---
+const EXIT_GATE_POSITIONS = [
+  { x: 0, y: 0, z: -28 },
+  { x: 0, y: 0, z: 28 },
+];
+const ESCAPE_RADIUS = 3;
+
+// --- 승패 판정 ---
+// 모든 생존자가 (탈출 또는 사망) 으로 정리되면 매치 종료.
+// 탈출자가 1명 이상이면 생존자 승, 아니면 살인마 승.
+
+module.exports = {
+  MATCH_SIZE,
+  SURVIVORS_PER_MATCH,
+  KILLERS_PER_MATCH,
+  ROLES,
+  HEALTH_STATES,
+  GENERATORS_PER_MATCH,
+  REPAIR_RATE_PER_SEC,
+  REPAIR_TICK_MS,
+  SURVIVOR_SPEED,
+  KILLER_SPEED_MULTIPLIER,
+  ATTACK_RANGE,
+  ATTACK_COOLDOWN_MS,
+  INTERACT_RANGE,
+  MAP_HALF_EXTENT,
+  MAP_MIN_Y,
+  MAP_MAX_Y,
+  MATCH_STATES,
+  GENERATOR_POSITIONS,
+  EXIT_GATE_POSITIONS,
+  ESCAPE_RADIUS,
+};

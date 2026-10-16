@@ -1,0 +1,1349 @@
+import * as THREE from 'three';
+import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+
+// ===========================================================================
+// DBD Clone 게임 클라이언트 (Vanilla JS + Three.js)
+// ---------------------------------------------------------------------------
+// 화면 흐름: [로그인/회원가입] → [로비/매칭] → [인게임 HUD]
+// 서버 권위 모델: 이동은 50ms 스로틀로 전송, 수리/공격/승패 판정은 서버가 최종 검증.
+// ===========================================================================
+
+const $ = (id) => document.getElementById(id);
+
+const els = {
+  screens: {
+    auth: $('screen-auth'),
+    lobby: $('screen-lobby'),
+    game: $('screen-game'),
+  },
+  tabLogin: $('tab-login'),
+  tabRegister: $('tab-register'),
+  formLogin: $('form-login'),
+  formRegister: $('form-register'),
+  authMessage: $('auth-message'),
+  connStatus: $('conn-status'),
+  userChip: $('user-chip'),
+  lobbyNickname: $('lobby-nickname'),
+  lobbyEmail: $('lobby-email'),
+  statWins: $('stat-wins'),
+  statLosses: $('stat-losses'),
+  statWinrate: $('stat-winrate'),
+  statPlayed: $('stat-played'),
+  btnFindMatch: $('btn-find-match'),
+  btnCancelMatch: $('btn-cancel-match'),
+  btnLogout: $('btn-logout'),
+  btnRefreshProfile: $('btn-refresh-profile'),
+  queuePanel: $('queue-panel'),
+  queueStatus: $('queue-status'),
+  lobbyMessage: $('lobby-message'),
+  gameContainer: $('game-container'),
+  roleBox: $('hud-role'),
+  roleTitle: $('role-title'),
+  roleDesc: $('role-desc'),
+  objective: $('hud-objective'),
+  generators: $('hud-generators'),
+  crosshair: $('crosshair'),
+  hitmarker: $('hitmarker'),
+  interactPrompt: $('interact-prompt'),
+  repairWrap: $('repair-wrap'),
+  repairLabel: $('repair-label'),
+  repairFill: $('repair-fill'),
+  repairText: $('repair-text'),
+  cooldownWrap: $('cooldown-wrap'),
+  cooldownFill: $('cooldown-fill'),
+  cooldownText: $('cooldown-text'),
+  healthWrap: $('health-wrap'),
+  healthPips: $('health-pips'),
+  killfeed: $('killfeed'),
+  toast: $('toast'),
+  lockHint: $('lock-hint'),
+  damageFlash: $('damage-flash'),
+  eventFlash: $('event-flash'),
+  killerVignette: $('killer-vignette'),
+  matchEnd: $('match-end'),
+  endTitle: $('end-title'),
+  endReason: $('end-reason'),
+  endPlayers: $('end-players'),
+  btnBackLobby: $('btn-back-lobby'),
+};
+
+// ---------------------------------------------------------------------------
+// 세션 / 소켓 상태
+// ---------------------------------------------------------------------------
+const TOKEN_KEY = 'dbd_token';
+const USER_KEY = 'dbd_user';
+
+const session = {
+  token: localStorage.getItem(TOKEN_KEY),
+  user: JSON.parse(localStorage.getItem(USER_KEY) || 'null'),
+};
+
+const net = {
+  socket: null,
+  socketId: null,
+  inQueue: false,
+};
+
+const game = {
+  active: false,
+  match: null,
+  role: null,
+  mySocketId: null,
+  gatesOpen: false,
+  myHealth: 'healthy',
+  escaped: false,
+};
+
+// ---------------------------------------------------------------------------
+// Three.js 상태
+// ---------------------------------------------------------------------------
+const view = {
+  renderer: null,
+  scene: null,
+  camera: null,
+  controls: null,
+  clock: null,
+  rafId: 0,
+  keys: new Set(),
+  playerPos: new THREE.Vector3(0, 1.7, 0),
+  eyeHeight: 1.7,
+  baseSpeed: 4.0,
+  moveAccum: 0,
+  remotes: new Map(),
+  generators: new Map(),
+  gates: [],
+  colliders: [],
+  flashlight: null,
+  repair: { generatorId: null, progress: 0, lastEmit: 0, active: false },
+  cooldownUntil: 0,
+  cooldownMs: 2500,
+  shakeUntil: 0,
+  shakeAmp: 0,
+  escapeEmitAt: 0,
+  raycaster: new THREE.Raycaster(),
+};
+
+const HEALTH_LABEL = {
+  healthy: '건강',
+  injured: '부상',
+  dying: '빈사',
+  dead: '사망',
+};
+
+const HEALTH_PIPS = {
+  healthy: '●●●',
+  injured: '●●○',
+  dying: '●○○',
+  dead: '○○○',
+};
+
+// ===========================================================================
+// 공용 UI 헬퍼
+// ===========================================================================
+function setScreen(name) {
+  for (const [key, section] of Object.entries(els.screens)) {
+    section.classList.toggle('active', key === name);
+  }
+}
+
+function setConn(online, text) {
+  els.connStatus.classList.toggle('online', online);
+  els.connStatus.classList.toggle('offline', !online);
+  els.connStatus.textContent = text;
+}
+
+function authMessage(text) {
+  els.authMessage.textContent = text || '';
+}
+
+function lobbyMessage(text) {
+  els.lobbyMessage.textContent = text || '';
+}
+
+let toastTimer = null;
+function toast(text, ms = 2600) {
+  els.toast.textContent = text;
+  els.toast.classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => els.toast.classList.add('hidden'), ms);
+}
+
+function feed(text, good = false) {
+  const li = document.createElement('li');
+  if (good) li.classList.add('good');
+  li.textContent = text;
+  els.killfeed.prepend(li);
+  while (els.killfeed.children.length > 5) {
+    els.killfeed.lastChild.remove();
+  }
+  setTimeout(() => li.remove(), 8000);
+}
+
+function flash(element, ms = 180) {
+  element.classList.add('show');
+  setTimeout(() => element.classList.remove('show'), ms);
+}
+
+// ===========================================================================
+// REST API
+// ===========================================================================
+async function api(path, { method = 'GET', body } = {}) {
+  const res = await fetch(path, {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(session.token ? { Authorization: `Bearer ${session.token}` } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.message || `요청 실패 (${res.status})`);
+  }
+  return data;
+}
+
+function saveSession(token, user) {
+  session.token = token;
+  session.user = user;
+  localStorage.setItem(TOKEN_KEY, token);
+  localStorage.setItem(USER_KEY, JSON.stringify(user));
+  els.userChip.textContent = user.nickname || user.email;
+  els.userChip.classList.remove('hidden');
+}
+
+function clearSession() {
+  session.token = null;
+  session.user = null;
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(USER_KEY);
+  els.userChip.classList.add('hidden');
+}
+
+function renderProfile(user) {
+  if (!user) return;
+  els.lobbyNickname.textContent = user.nickname || '(닉네임 없음)';
+  els.lobbyEmail.textContent = user.email || '';
+  const stats = user.gameStats || {};
+  const wins = stats.wins || 0;
+  const losses = stats.losses || 0;
+  const played = stats.matchesPlayed ?? wins + losses;
+  const rate = user.winRate ?? (played > 0 ? Number(((wins / played) * 100).toFixed(1)) : 0);
+  els.statWins.textContent = String(wins);
+  els.statLosses.textContent = String(losses);
+  els.statPlayed.textContent = String(played);
+  els.statWinrate.textContent = `${rate}%`;
+}
+
+async function refreshProfile() {
+  try {
+    const data = await api('/api/auth/me');
+    session.user = data.user;
+    localStorage.setItem(USER_KEY, JSON.stringify(data.user));
+    renderProfile(data.user);
+  } catch (err) {
+    lobbyMessage(err.message);
+  }
+}
+
+// ===========================================================================
+// 인증 화면 이벤트
+// ===========================================================================
+els.tabLogin.addEventListener('click', () => {
+  els.tabLogin.classList.add('active');
+  els.tabRegister.classList.remove('active');
+  els.formLogin.classList.remove('hidden');
+  els.formRegister.classList.add('hidden');
+  authMessage('');
+});
+
+els.tabRegister.addEventListener('click', () => {
+  els.tabRegister.classList.add('active');
+  els.tabLogin.classList.remove('active');
+  els.formRegister.classList.remove('hidden');
+  els.formLogin.classList.add('hidden');
+  authMessage('');
+});
+
+els.formLogin.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  authMessage('로그인 중...');
+  try {
+    const data = await api('/api/auth/login', {
+      method: 'POST',
+      body: {
+        email: $('login-email').value.trim(),
+        password: $('login-password').value,
+      },
+    });
+    saveSession(data.token, data.user);
+    renderProfile(data.user);
+    enterLobby();
+  } catch (err) {
+    authMessage(err.message);
+  }
+});
+
+els.formRegister.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  authMessage('회원가입 중...');
+  try {
+    const data = await api('/api/auth/register', {
+      method: 'POST',
+      body: {
+        email: $('reg-email').value.trim(),
+        nickname: $('reg-nickname').value.trim() || undefined,
+        password: $('reg-password').value,
+      },
+    });
+    saveSession(data.token, data.user);
+    renderProfile(data.user);
+    enterLobby();
+  } catch (err) {
+    authMessage(err.message);
+  }
+});
+
+function enterLobby() {
+  authMessage('');
+  setScreen('lobby');
+  connectSocket();
+}
+
+els.btnLogout.addEventListener('click', () => {
+  teardownGame();
+  try {
+    net.socket?.disconnect();
+  } catch {
+    // 무시
+  }
+  net.socket = null;
+  net.inQueue = false;
+  clearSession();
+  setConn(false, '연결 안 됨');
+  setScreen('auth');
+});
+
+els.btnRefreshProfile.addEventListener('click', refreshProfile);
+
+// ===========================================================================
+// Socket.io 연결 및 매치메이킹
+// ===========================================================================
+function connectSocket() {
+  if (!session.token) {
+    lobbyMessage('로그인이 필요합니다.');
+    return;
+  }
+  if (net.socket) {
+    try {
+      net.socket.disconnect();
+    } catch {
+      // 무시
+    }
+    net.socket = null;
+  }
+
+  setConn(false, '연결 중...');
+  // eslint-disable-next-line no-undef
+  const socket = io(window.location.origin, {
+    auth: { token: session.token },
+    transports: ['websocket', 'polling'],
+  });
+  net.socket = socket;
+
+  socket.on('connect', () => {
+    setConn(true, '서버 연결됨');
+    lobbyMessage('');
+  });
+
+  socket.on('connect_error', (err) => {
+    setConn(false, '연결 실패');
+    const message = err?.message || '소켓 연결에 실패했습니다.';
+    lobbyMessage(message);
+    if (/만료|유효하지|인증|토큰/i.test(message)) {
+      toast('인증이 만료되었습니다. 다시 로그인해주세요.');
+    }
+  });
+
+  socket.on('disconnect', () => {
+    setConn(false, '연결 끊김');
+    net.inQueue = false;
+    updateQueueUI();
+  });
+
+  socket.on('connected', (data) => {
+    net.socketId = data.socketId;
+  });
+
+  socket.on('error:message', (data) => {
+    toast(data?.message || '오류가 발생했습니다.');
+  });
+
+  socket.on('queue:joined', (snapshot) => {
+    net.inQueue = true;
+    updateQueueUI(snapshot);
+  });
+
+  socket.on('queue:update', (snapshot) => {
+    if (net.inQueue) updateQueueUI(snapshot);
+  });
+
+  socket.on('queue:left', (snapshot) => {
+    net.inQueue = false;
+    updateQueueUI(snapshot);
+  });
+
+  // --- 매치 성사: 역할/발전기/게이트 스냅샷 수신 ---
+  socket.on('match:found', (snapshot) => {
+    net.inQueue = false;
+    startMatch(snapshot);
+  });
+
+  // --- 인게임 브로드캐스트 수신 ---
+  socket.on('player:moved', onPlayerMoved);
+  socket.on('repair:updated', onRepairUpdated);
+  socket.on('generator:completed', onGeneratorCompleted);
+  socket.on('gates:opened', onGatesOpened);
+  socket.on('attack:result', onAttackResult);
+  socket.on('attack:missed', onAttackMissed);
+  socket.on('player:damaged', onPlayerDamaged);
+  socket.on('player:died', onPlayerDied);
+  socket.on('survivor:escaped', onSurvivorEscaped);
+  socket.on('player:left', onPlayerLeft);
+  socket.on('state:correction', (data) => {
+    if (data?.position) {
+      view.playerPos.set(data.position.x, view.eyeHeight, data.position.z);
+    }
+  });
+  socket.on('match:end', onMatchEnd);
+}
+
+function updateQueueUI(snapshot) {
+  const queued = net.inQueue;
+  els.btnFindMatch.classList.toggle('hidden', queued);
+  els.btnCancelMatch.classList.toggle('hidden', !queued);
+  els.queuePanel.classList.toggle('hidden', !queued);
+  if (queued) {
+    const pos = snapshot?.position ?? '?';
+    const size = snapshot?.queueSize ?? '?';
+    els.queueStatus.textContent = `매칭 중... 내 순서 ${pos} / 대기 ${size}명 (4명 충원 시 시작)`;
+  }
+}
+
+els.btnFindMatch.addEventListener('click', () => {
+  if (!net.socket) connectSocket();
+  net.socket?.emit('queue:join');
+});
+
+els.btnCancelMatch.addEventListener('click', () => {
+  net.socket?.emit('queue:leave');
+});
+
+els.btnBackLobby.addEventListener('click', async () => {
+  els.matchEnd.classList.add('hidden');
+  teardownGame();
+  setScreen('lobby');
+  await refreshProfile();
+});
+
+// ===========================================================================
+// 매치 시작 / 종료
+// ===========================================================================
+function startMatch(snapshot) {
+  game.active = true;
+  game.match = snapshot;
+  game.role = snapshot.yourRole;
+  game.mySocketId = snapshot.yourSocketId;
+  game.gatesOpen = false;
+  game.myHealth = 'healthy';
+  game.escaped = false;
+
+  els.killfeed.innerHTML = '';
+  els.matchEnd.classList.add('hidden');
+  setScreen('game');
+
+  const isKiller = game.role === 'killer';
+  els.roleBox.classList.remove('hidden');
+  els.roleTitle.textContent = isKiller ? '살인마' : '생존자';
+  els.roleTitle.className = isKiller ? 'killer' : 'survivor';
+  els.roleTitle.id = 'role-title';
+  els.roleDesc.textContent = isKiller
+    ? '생존자를 모두 처치하라 (좌클릭 공격)'
+    : '발전기 3대를 수리하고 탈출하라 (E 수리)';
+  els.killerVignette.classList.toggle('hidden', !isKiller);
+  els.repairWrap.classList.toggle('hidden', isKiller);
+  els.cooldownWrap.classList.toggle('hidden', !isKiller);
+  els.healthWrap.classList.toggle('hidden', isKiller);
+  updateObjective();
+  updateHealthUI();
+
+  initGame(snapshot);
+  toast(isKiller ? '당신은 살인마입니다.' : '당신은 생존자입니다.');
+}
+
+function onMatchEnd(data) {
+  if (!game.active) return;
+  game.active = false;
+
+  const iWon =
+    (data.winner === 'survivor' && game.role === 'survivor' && game.escaped) ||
+    (data.winner === 'killer' && game.role === 'killer');
+
+  els.endTitle.textContent = data.winner === 'survivor' ? '생존자 승리' : '살인마 승리';
+  els.endTitle.className = iWon ? 'win' : 'lose';
+  els.endReason.textContent = describeEndReason(data.reason, data.winner);
+  els.endPlayers.innerHTML = '';
+  for (const p of data.players || []) {
+    const li = document.createElement('li');
+    const left = document.createElement('span');
+    left.textContent = `${p.role === 'killer' ? '🔪' : '🔦'} ${p.nickname || p.email} (${HEALTH_LABEL[p.health] || p.health}${p.escaped ? '·탈출' : ''})`;
+    const right = document.createElement('b');
+    right.textContent = p.win ? '승리' : '패배';
+    li.append(left, right);
+    els.endPlayers.append(li);
+  }
+  els.matchEnd.classList.remove('hidden');
+  try {
+    view.controls?.unlock();
+  } catch {
+    // 무시
+  }
+  cancelAnimationFrame(view.rafId);
+}
+
+function describeEndReason(reason, winner) {
+  if (reason === 'time_expired') return '제한 시간이 만료되어 살인마가 승리했습니다.';
+  if (reason === 'killer_disconnected') return '살인마의 연결이 끊겨 생존자가 승리했습니다.';
+  if (reason === 'all_survivors_dead') return '모든 생존자가 처치되었습니다.';
+  return winner === 'survivor'
+    ? '생존자가 탈출에 성공했습니다.'
+    : '모든 생존자가 정리되었습니다.';
+}
+
+// ===========================================================================
+// Three.js 초기화
+// ===========================================================================
+function teardownGame() {
+  game.active = false;
+  game.match = null;
+  cancelAnimationFrame(view.rafId);
+  window.removeEventListener('resize', onResize);
+  document.removeEventListener('keydown', onKeyDown);
+  document.removeEventListener('keyup', onKeyUp);
+  document.removeEventListener('mousedown', onMouseDown);
+  try {
+    view.controls?.dispose();
+  } catch {
+    // 무시
+  }
+  if (view.renderer) {
+    view.renderer.dispose();
+    view.renderer.domElement.remove();
+  }
+  view.renderer = null;
+  view.scene = null;
+  view.camera = null;
+  view.controls = null;
+  view.remotes.clear();
+  view.generators.clear();
+  view.gates = [];
+  view.colliders = [];
+  view.keys.clear();
+  els.gameContainer.innerHTML = '';
+}
+
+function initGame(snapshot) {
+  teardownGame();
+  game.active = true;
+
+  const container = els.gameContainer;
+  const width = container.clientWidth || window.innerWidth;
+  const height = container.clientHeight || window.innerHeight;
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(width, height);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  container.appendChild(renderer.domElement);
+  view.renderer = renderer;
+
+  // --- 칠흑 같은 맵 연출: 극도로 낮은 앰비언트 + 지수 안개 ---
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x030304);
+  scene.fog = new THREE.FogExp2(0x050505, 0.04);
+  scene.add(new THREE.AmbientLight(0xffffff, 0.02));
+  view.scene = scene;
+
+  const isKiller = game.role === 'killer';
+  view.eyeHeight = isKiller ? 1.9 : 1.7;
+  view.baseSpeed = isKiller ? 4.0 * 1.25 : 4.0;
+
+  const camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 120);
+  view.camera = camera;
+  scene.add(camera);
+
+  // 내 스폰 위치 적용.
+  const me = snapshot.players.find((p) => p.socketId === game.mySocketId);
+  if (me?.position) {
+    view.playerPos.set(me.position.x, view.eyeHeight, me.position.z);
+  } else {
+    view.playerPos.set(0, view.eyeHeight, 20);
+  }
+  camera.position.copy(view.playerPos);
+
+  // --- 1인칭 제어: 클릭 시 포인터 잠금, WASD 이동, 마우스 시선 회전 ---
+  const controls = new PointerLockControls(camera, renderer.domElement);
+  view.controls = controls;
+  renderer.domElement.addEventListener('click', () => {
+    if (game.active && !controls.isLocked) controls.lock();
+  });
+  controls.addEventListener('lock', () => els.lockHint.classList.add('hidden'));
+  controls.addEventListener('unlock', () => {
+    if (game.active) els.lockHint.classList.remove('hidden');
+  });
+
+  // --- 손전등(생존자) / 안광(살인마): 카메라 정면 SpotLight ---
+  if (isKiller) {
+    const red = new THREE.SpotLight(0xff1a2b, 60, 30, Math.PI / 5, 0.45, 1.2);
+    red.position.set(0, 0.2, 0.2);
+    camera.add(red);
+    red.target.position.set(0, 0, -12);
+    camera.add(red.target);
+    view.flashlight = red;
+  } else {
+    const torch = new THREE.SpotLight(0xfff2d8, 55, 26, Math.PI / 6, 0.5, 1.1);
+    torch.position.set(0.15, -0.1, 0.1);
+    camera.add(torch);
+    torch.target.position.set(0, -0.4, -10);
+    camera.add(torch.target);
+    torch.castShadow = true;
+    torch.shadow.mapSize.set(512, 512);
+    view.flashlight = torch;
+  }
+
+  buildMap(scene, snapshot);
+  spawnRemotes(snapshot);
+
+  view.clock = new THREE.Clock();
+  view.moveAccum = 0;
+  view.cooldownUntil = 0;
+
+  window.addEventListener('resize', onResize);
+  document.addEventListener('keydown', onKeyDown);
+  document.addEventListener('keyup', onKeyUp);
+  document.addEventListener('mousedown', onMouseDown);
+  renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  view.rafId = requestAnimationFrame(tick);
+}
+
+function onResize() {
+  if (!view.renderer || !view.camera) return;
+  const width = els.gameContainer.clientWidth || window.innerWidth;
+  const height = els.gameContainer.clientHeight || window.innerHeight;
+  view.camera.aspect = width / height;
+  view.camera.updateProjectionMatrix();
+  view.renderer.setSize(width, height);
+}
+
+// ===========================================================================
+// 맵 / 오브젝트 생성
+// ===========================================================================
+function buildMap(scene, snapshot) {
+  view.colliders = [];
+
+  // 바닥 (60 x 60)
+  const floor = new THREE.Mesh(
+    new THREE.PlaneGeometry(60, 60),
+    new THREE.MeshStandardMaterial({ color: 0x0b0b0d, roughness: 1, metalness: 0 })
+  );
+  floor.rotation.x = -Math.PI / 2;
+  floor.receiveShadow = true;
+  scene.add(floor);
+
+  // 희미한 격자 (방향 감각용, 매우 어둡게)
+  const grid = new THREE.GridHelper(60, 30, 0x1a1c22, 0x101216);
+  grid.position.y = 0.01;
+  grid.material.transparent = true;
+  grid.material.opacity = 0.35;
+  scene.add(grid);
+
+  // 외곽 벽
+  const wallMat = new THREE.MeshStandardMaterial({ color: 0x14151a, roughness: 0.95 });
+  const wallGeoLong = new THREE.BoxGeometry(62, 4, 1);
+  const wallGeoSide = new THREE.BoxGeometry(1, 4, 62);
+  const walls = [
+    { geo: wallGeoLong, pos: [0, 2, -30.5] },
+    { geo: wallGeoLong, pos: [0, 2, 30.5] },
+    { geo: wallGeoSide, pos: [-30.5, 2, 0] },
+    { geo: wallGeoSide, pos: [30.5, 2, 0] },
+  ];
+  for (const wall of walls) {
+    const mesh = new THREE.Mesh(wall.geo, wallMat);
+    mesh.position.set(...wall.pos);
+    scene.add(mesh);
+  }
+
+  // 장애물 상자 (고정 배치, 결정적)
+  const obstacles = [
+    { x: -8, z: -6, w: 3, h: 2.2, d: 3 },
+    { x: 8, z: -6, w: 3, h: 2.2, d: 3 },
+    { x: -8, z: 8, w: 4, h: 1.6, d: 2 },
+    { x: 8, z: 8, w: 4, h: 1.6, d: 2 },
+    { x: 0, z: 0, w: 2.4, h: 2.6, d: 2.4 },
+    { x: -14, z: 2, w: 2, h: 1.4, d: 5 },
+    { x: 14, z: 2, w: 2, h: 1.4, d: 5 },
+  ];
+  const crateMat = new THREE.MeshStandardMaterial({ color: 0x191b20, roughness: 0.9 });
+  for (const box of obstacles) {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(box.w, box.h, box.d), crateMat);
+    mesh.position.set(box.x, box.h / 2, box.z);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    scene.add(mesh);
+    view.colliders.push({ x: box.x, z: box.z, r: Math.max(box.w, box.d) / 2 + 0.35 });
+  }
+
+  // 발전기 3대 (서버 스냅샷 좌표 사용)
+  for (const gen of snapshot.generators) {
+    createGenerator(scene, gen);
+  }
+
+  // 탈출구 2개
+  for (const gate of snapshot.gates) {
+    createGate(scene, gate);
+  }
+}
+
+function createGenerator(scene, gen) {
+  const group = new THREE.Group();
+  group.position.set(gen.position.x, 0, gen.position.z);
+
+  const body = new THREE.Mesh(
+    new THREE.BoxGeometry(1.7, 1.2, 1.1),
+    new THREE.MeshStandardMaterial({ color: 0x23262e, roughness: 0.7, metalness: 0.35 })
+  );
+  body.position.y = 0.6;
+  body.castShadow = true;
+  group.add(body);
+
+  // 상단 표시등 (수리 전: 주황 / 완료: 네온 녹색)
+  const topMat = new THREE.MeshStandardMaterial({
+    color: 0x2a1c08,
+    emissive: 0xff9a1f,
+    emissiveIntensity: 1.4,
+  });
+  const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.28, 0.5), topMat);
+  lamp.position.y = 1.34;
+  group.add(lamp);
+
+  const light = new THREE.PointLight(0xff9a1f, 6, 9, 1.6);
+  light.position.y = 1.8;
+  group.add(light);
+
+  const label = makeLabelSprite(`발전기 ${gen.index + 1}`, '#ffb35c');
+  label.position.y = 2.3;
+  group.add(label);
+
+  scene.add(group);
+  view.colliders.push({ x: gen.position.x, z: gen.position.z, r: 1.35 });
+  view.generators.set(gen.id, {
+    id: gen.id,
+    index: gen.index,
+    position: new THREE.Vector3(gen.position.x, 0, gen.position.z),
+    progress: gen.progress || 0,
+    completed: gen.completed || false,
+    group,
+    topMat,
+    light,
+    flashUntil: 0,
+  });
+}
+
+function createGate(scene, gate) {
+  const group = new THREE.Group();
+  group.position.set(gate.position.x, 0, gate.position.z);
+
+  const pillarGeo = new THREE.BoxGeometry(0.6, 4, 0.6);
+  const pillarMat = new THREE.MeshStandardMaterial({
+    color: 0x1a0508,
+    emissive: 0xff2d3f,
+    emissiveIntensity: 0.9,
+  });
+  const left = new THREE.Mesh(pillarGeo, pillarMat);
+  left.position.set(-2, 2, 0);
+  const right = new THREE.Mesh(pillarGeo, pillarMat.clone());
+  right.position.set(2, 2, 0);
+  const top = new THREE.Mesh(new THREE.BoxGeometry(4.6, 0.5, 0.6), pillarMat.clone());
+  top.position.set(0, 4.1, 0);
+  group.add(left, right, top);
+
+  const light = new THREE.PointLight(0xff2d3f, 10, 16, 1.6);
+  light.position.y = 3;
+  group.add(light);
+
+  const label = makeLabelSprite('탈출구 (닫힘)', '#ff8b95');
+  label.position.y = 5;
+  group.add(label);
+
+  scene.add(group);
+  view.gates.push({ id: gate.id, group, light, mats: [left.material, right.material, top.material], label });
+}
+
+function makeLabelSprite(text, color = '#ffffff') {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  ctx.font = 'bold 30px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.shadowColor = 'black';
+  ctx.shadowBlur = 8;
+  ctx.fillStyle = color;
+  ctx.fillText(text, 128, 32);
+  const texture = new THREE.CanvasTexture(canvas);
+  const sprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false })
+  );
+  sprite.scale.set(3.2, 0.8, 1);
+  return sprite;
+}
+
+// ===========================================================================
+// 원격 플레이어 메시 + 부드러운 보간
+// ===========================================================================
+function makePlayerMesh(role, nickname) {
+  const group = new THREE.Group();
+  const isKiller = role === 'killer';
+  const bodyColor = isKiller ? 0x4a0d14 : 0x0e4a3a;
+  const glowColor = isKiller ? '#ff2d3f' : '#22e6a2';
+
+  const body = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.34, 0.42, isKiller ? 1.9 : 1.6, 12),
+    new THREE.MeshStandardMaterial({
+      color: bodyColor,
+      roughness: 0.8,
+      emissive: isKiller ? 0x550000 : 0x003322,
+      emissiveIntensity: 0.7,
+    })
+  );
+  body.position.y = isKiller ? 0.95 : 0.8;
+  body.castShadow = true;
+  group.add(body);
+
+  const head = new THREE.Mesh(
+    new THREE.SphereGeometry(0.24, 14, 14),
+    new THREE.MeshStandardMaterial({ color: 0xd8cfc0, roughness: 0.85 })
+  );
+  head.position.y = isKiller ? 2.05 : 1.78;
+  group.add(head);
+
+  // 살인마 눈빛 (빨간 점 2개)
+  if (isKiller) {
+    const eyeGeo = new THREE.SphereGeometry(0.045, 8, 8);
+    const eyeMat = new THREE.MeshBasicMaterial({ color: 0xff1a2b });
+    const eyeL = new THREE.Mesh(eyeGeo, eyeMat);
+    eyeL.position.set(-0.09, 2.08, 0.2);
+    const eyeR = new THREE.Mesh(eyeGeo, eyeMat);
+    eyeR.position.set(0.09, 2.08, 0.2);
+    group.add(eyeL, eyeR);
+  }
+
+  const label = makeLabelSprite(nickname || (isKiller ? '살인마' : '생존자'), glowColor);
+  label.position.y = isKiller ? 2.6 : 2.3;
+  group.add(label);
+
+  return { group, body, head, label };
+}
+
+function spawnRemotes(snapshot) {
+  for (const p of snapshot.players) {
+    if (p.socketId === game.mySocketId) continue;
+    const { group, body, head } = makePlayerMesh(p.role, p.nickname || p.email);
+    group.position.set(p.position.x, 0, p.position.z);
+    body.userData.socketId = p.socketId;
+    head.userData.socketId = p.socketId;
+    view.scene.add(group);
+    view.remotes.set(p.socketId, {
+      socketId: p.socketId,
+      role: p.role,
+      nickname: p.nickname,
+      health: p.health,
+      escaped: p.escaped,
+      group,
+      body,
+      head,
+      targetPos: new THREE.Vector3(p.position.x, 0, p.position.z),
+      targetYaw: p.rotation?.y || 0,
+    });
+  }
+}
+
+function lerpAngle(current, target, t) {
+  const delta = Math.atan2(Math.sin(target - current), Math.cos(target - current));
+  return current + delta * t;
+}
+
+function updateRemotes(dt) {
+  // 뚝뚝 끊기지 않도록 매 프레임 lerp 로 위치/회전 동기화.
+  const factor = 1 - Math.exp(-12 * dt);
+  for (const remote of view.remotes.values()) {
+    const pos = remote.group.position;
+    pos.x = THREE.MathUtils.lerp(pos.x, remote.targetPos.x, factor);
+    pos.z = THREE.MathUtils.lerp(pos.z, remote.targetPos.z, factor);
+    remote.group.rotation.y = lerpAngle(remote.group.rotation.y, remote.targetYaw, factor);
+  }
+}
+
+// ===========================================================================
+// 입력 처리
+// ===========================================================================
+function onKeyDown(e) {
+  if (!game.active) return;
+  view.keys.add(e.code);
+  if (['ArrowUp', 'ArrowDown', 'Space'].includes(e.code)) e.preventDefault();
+}
+
+function onKeyUp(e) {
+  view.keys.delete(e.code);
+}
+
+function onMouseDown(e) {
+  if (!game.active || game.role !== 'killer') return;
+  if (e.button !== 0) return;
+  if (!view.controls?.isLocked) return;
+  tryAttack();
+}
+
+// ===========================================================================
+// 메인 루프
+// ===========================================================================
+function tick() {
+  if (!game.active) return;
+  view.rafId = requestAnimationFrame(tick);
+  const dt = Math.min(view.clock.getDelta(), 0.05);
+
+  updateMovement(dt);
+  updateRepair(dt);
+  updateCooldownUI();
+  updateRemotes(dt);
+  updateGeneratorFx();
+  maybeAutoEscape();
+
+  view.renderer.render(view.scene, view.camera);
+}
+
+function updateMovement(dt) {
+  const keys = view.keys;
+  let forwardInput = 0;
+  let rightInput = 0;
+  if (keys.has('KeyW') || keys.has('ArrowUp')) forwardInput += 1;
+  if (keys.has('KeyS') || keys.has('ArrowDown')) forwardInput -= 1;
+  if (keys.has('KeyD') || keys.has('ArrowRight')) rightInput += 1;
+  if (keys.has('KeyA') || keys.has('ArrowLeft')) rightInput -= 1;
+
+  if (forwardInput !== 0 || rightInput !== 0) {
+    const camera = view.camera;
+    const forward = new THREE.Vector3();
+    camera.getWorldDirection(forward);
+    forward.y = 0;
+    forward.normalize();
+    const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
+
+    const move = new THREE.Vector3()
+      .addScaledVector(forward, forwardInput)
+      .addScaledVector(right, rightInput);
+    if (move.lengthSq() > 1) move.normalize();
+    move.multiplyScalar(view.baseSpeed * dt);
+    view.playerPos.add(move);
+
+    // 맵 경계 + 장애물 충돌 해소.
+    view.playerPos.x = THREE.MathUtils.clamp(view.playerPos.x, -29, 29);
+    view.playerPos.z = THREE.MathUtils.clamp(view.playerPos.z, -29, 29);
+    for (const collider of view.colliders) {
+      const dx = view.playerPos.x - collider.x;
+      const dz = view.playerPos.z - collider.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist < collider.r && dist > 0.0001) {
+        const push = (collider.r - dist) / dist;
+        view.playerPos.x += dx * push;
+        view.playerPos.z += dz * push;
+      }
+    }
+  }
+
+  view.playerPos.y = view.eyeHeight;
+
+  // 화면 흔들림(Screen Shake): 위치 지터를 더하되 원본 좌표는 보존.
+  let jitter = null;
+  if (Date.now() < view.shakeUntil) {
+    const amp = view.shakeAmp;
+    jitter = new THREE.Vector3(
+      (Math.random() - 0.5) * amp,
+      (Math.random() - 0.5) * amp * 0.6,
+      (Math.random() - 0.5) * amp
+    );
+    view.camera.position.copy(view.playerPos).add(jitter);
+  } else {
+    view.camera.position.copy(view.playerPos);
+  }
+
+  // 위치 송신 스로틀링: 정확히 50ms 간격으로 제한.
+  view.moveAccum += dt;
+  if (view.moveAccum >= 0.05) {
+    view.moveAccum = 0;
+    net.socket?.emit('move', {
+      position: { x: view.playerPos.x, y: view.playerPos.y, z: view.playerPos.z },
+      rotation: {
+        x: view.camera.rotation.x,
+        y: view.camera.rotation.y,
+        z: view.camera.rotation.z,
+      },
+    });
+  }
+}
+
+function shakeScreen(amp = 0.25, ms = 300) {
+  view.shakeAmp = amp;
+  view.shakeUntil = Date.now() + ms;
+}
+
+// ===========================================================================
+// 발전기 수리 (생존자, E 키, 초당 5%)
+// ===========================================================================
+function nearestGenerator() {
+  let best = null;
+  let bestDist = Infinity;
+  for (const gen of view.generators.values()) {
+    if (gen.completed) continue;
+    const dist = Math.hypot(
+      view.playerPos.x - gen.position.x,
+      view.playerPos.z - gen.position.z
+    );
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = gen;
+    }
+  }
+  return { generator: best, distance: bestDist };
+}
+
+function updateRepair(dt) {
+  if (game.role !== 'survivor' || !game.active) {
+    view.repair.active = false;
+    return;
+  }
+
+  const { generator, distance } = nearestGenerator();
+  const inRange = generator && distance <= 3.0;
+  const wantRepair = view.keys.has('KeyE') && inRange;
+
+  if (inRange && !generator.completed) {
+    els.interactPrompt.classList.remove('hidden');
+    els.interactPrompt.textContent =
+      game.gatesOpen || generator.completed
+        ? '발전기 완료!'
+        : `E 키를 눌러 수리 (${Math.floor(generator.progress)}%)`;
+  } else {
+    els.interactPrompt.classList.add('hidden');
+  }
+
+  if (wantRepair) {
+    if (view.repair.generatorId !== generator.id) {
+      view.repair.generatorId = generator.id;
+      view.repair.progress = generator.progress;
+    }
+    view.repair.active = true;
+    // 초당 5%씩 로컬 게이지 상승.
+    view.repair.progress = Math.min(100, view.repair.progress + 5 * dt);
+
+    els.repairLabel.textContent = `발전기 ${generator.index + 1} 수리 중`;
+    els.repairText.textContent = `${Math.floor(view.repair.progress)}%`;
+    els.repairFill.style.width = `${view.repair.progress}%`;
+
+    // 수리 패킷 송신 (200ms 간격으로 추가 스로틀).
+    const now = performance.now();
+    if (now - view.repair.lastEmit >= 200) {
+      view.repair.lastEmit = now;
+      net.socket?.emit('repair_progress', {
+        generatorId: generator.id,
+        progress: Number(view.repair.progress.toFixed(2)),
+      });
+    }
+  } else if (view.repair.active) {
+    if (view.repair.generatorId) {
+      net.socket?.emit('repair:stop', { generatorId: view.repair.generatorId });
+    }
+    view.repair.active = false;
+    view.repair.generatorId = null;
+  }
+}
+
+function onRepairUpdated(data) {
+  const gen = view.generators.get(data.generatorId);
+  if (!gen) return;
+  gen.progress = data.progress;
+  if (data.by === game.mySocketId) {
+    view.repair.progress = data.progress;
+    els.repairText.textContent = `${Math.floor(data.progress)}%`;
+    els.repairFill.style.width = `${data.progress}%`;
+  }
+  updateObjective();
+  renderGeneratorList();
+}
+
+function onGeneratorCompleted(data) {
+  const gen = view.generators.get(data.generatorId);
+  if (gen) {
+    gen.completed = true;
+    gen.progress = 100;
+    // 100% 달성 시 네온 녹색 번쩍임 연출.
+    gen.topMat.emissive.set(0x22e6a2);
+    gen.topMat.emissiveIntensity = 3;
+    gen.light.color.set(0x22e6a2);
+    gen.light.intensity = 18;
+    gen.flashUntil = performance.now() + 1200;
+    flash(els.eventFlash, 350);
+  }
+  feed(`⚡ 발전기가 수리 완료되었습니다 (${completedCount()} / 3)`, true);
+  updateObjective();
+  renderGeneratorList();
+}
+
+function completedCount() {
+  let count = 0;
+  for (const gen of view.generators.values()) {
+    if (gen.completed) count += 1;
+  }
+  return count;
+}
+
+function updateGeneratorFx() {
+  const now = performance.now();
+  for (const gen of view.generators.values()) {
+    if (now < gen.flashUntil) {
+      gen.light.intensity = 14 + Math.sin(now / 60) * 8;
+    } else if (gen.completed) {
+      gen.light.intensity = 10;
+      gen.topMat.emissiveIntensity = 2;
+    }
+  }
+}
+
+function renderGeneratorList() {
+  els.generators.innerHTML = '';
+  const sorted = [...view.generators.values()].sort((a, b) => a.index - b.index);
+  for (const gen of sorted) {
+    const li = document.createElement('li');
+    if (gen.completed) li.classList.add('done');
+    li.textContent = gen.completed
+      ? `발전기 ${gen.index + 1}: 완료 ✓`
+      : `발전기 ${gen.index + 1}: ${Math.floor(gen.progress)}%`;
+    els.generators.append(li);
+  }
+}
+
+function updateObjective() {
+  if (game.gatesOpen) {
+    els.objective.textContent = game.role === 'killer'
+      ? '탈출을 저지하라!'
+      : '탈출구가 열렸다! 탈출구로 이동하라!';
+  } else {
+    els.objective.textContent = `발전기 수리: ${completedCount()} / 3`;
+  }
+}
+
+// ===========================================================================
+// 살인마 공격 (좌클릭, Raycaster 사거리 4)
+// ===========================================================================
+function tryAttack() {
+  const now = Date.now();
+  if (now < view.cooldownUntil) return;
+
+  view.raycaster.setFromCamera({ x: 0, y: 0 }, view.camera);
+  view.raycaster.far = 4;
+
+  const targets = [];
+  for (const remote of view.remotes.values()) {
+    if (remote.role !== 'survivor' || remote.escaped) continue;
+    if (remote.health === 'dead') continue;
+    targets.push(remote.body, remote.head);
+  }
+  const hits = view.raycaster.intersectObjects(targets, false);
+  // 공격 쿨다운은 휘두를 때마다 적용.
+  view.cooldownUntil = now + view.cooldownMs;
+
+  if (hits.length === 0) return;
+  const targetId = hits[0].object.userData.socketId;
+  if (!targetId) return;
+
+  // 타격 성공: 화면 흔들림 + 히트마커 + 서버 판정 요청.
+  shakeScreen(0.3, 320);
+  els.hitmarker.classList.remove('hidden');
+  setTimeout(() => els.hitmarker.classList.add('hidden'), 220);
+  net.socket?.emit('attack_hit', { targetId });
+}
+
+function updateCooldownUI() {
+  if (game.role !== 'killer') return;
+  const now = Date.now();
+  const remaining = Math.max(0, view.cooldownUntil - now);
+  const ratio = 1 - remaining / view.cooldownMs;
+  els.cooldownFill.style.width = `${Math.round(ratio * 100)}%`;
+  els.cooldownWrap.classList.toggle('cooling', remaining > 0);
+  els.cooldownText.textContent =
+    remaining > 0 ? `${(remaining / 1000).toFixed(1)}초` : '준비 완료';
+}
+
+function onAttackResult(data) {
+  if (data?.hit === false && data.reason === 'cooldown' && data.retryAfterMs) {
+    view.cooldownUntil = Date.now() + data.retryAfterMs;
+  }
+}
+
+function onAttackMissed(data) {
+  if (data?.attackerId === game.mySocketId) {
+    toast('공격이 빗나갔다.');
+  }
+}
+
+function onPlayerDamaged(data) {
+  const target = view.remotes.get(data.targetId);
+  if (target) {
+    target.health = data.health;
+    if (data.health === 'dead') markRemoteDead(target);
+  }
+  if (data.targetId === game.mySocketId) {
+    game.myHealth = data.health;
+    updateHealthUI();
+    flash(els.damageFlash, 280);
+    shakeScreen(0.35, 380);
+    toast(`살인마에게 공격당했다! (상태: ${HEALTH_LABEL[data.health]})`);
+  }
+  if (data.attackerId === game.mySocketId) {
+    els.hitmarker.classList.remove('hidden');
+    setTimeout(() => els.hitmarker.classList.add('hidden'), 220);
+    feed(`🔪 생존자를 공격했다 (${HEALTH_LABEL[data.health]})`);
+  }
+}
+
+function onPlayerDied(data) {
+  const target = view.remotes.get(data.socketId);
+  if (target) markRemoteDead(target);
+  if (data.socketId === game.mySocketId) {
+    game.myHealth = 'dead';
+    updateHealthUI();
+    toast('당신은 처치당했습니다. 관전 모드...');
+  } else {
+    feed(`💀 생존자 처치 (${target?.nickname || 'unknown'})`);
+  }
+}
+
+function markRemoteDead(remote) {
+  remote.health = 'dead';
+  remote.body.material.color.set(0x0a0a0a);
+  remote.body.material.emissive.set(0x000000);
+  remote.group.rotation.z = Math.PI / 2;
+  remote.group.position.y = -0.6;
+}
+
+function updateHealthUI() {
+  els.healthPips.textContent = `${HEALTH_PIPS[game.myHealth] || ''} ${HEALTH_LABEL[game.myHealth] || ''}`;
+}
+
+// ===========================================================================
+// 탈출 / 게이트
+// ===========================================================================
+function onGatesOpened(data) {
+  game.gatesOpen = true;
+  for (const gateState of data.gates || []) {
+    const gate = view.gates.find((g) => g.id === gateState.id);
+    if (!gate) continue;
+    for (const mat of gate.mats) {
+      mat.emissive.set(0x22e6a2);
+      mat.emissiveIntensity = 1.6;
+    }
+    gate.light.color.set(0x22e6a2);
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 64;
+    const ctx = canvas.getContext('2d');
+    ctx.font = 'bold 30px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#22e6a2';
+    ctx.fillText('탈출구 (개방)', 128, 32);
+    gate.label.material.map = new THREE.CanvasTexture(canvas);
+    gate.label.material.needsUpdate = true;
+  }
+  flash(els.eventFlash, 400);
+  feed('🚪 모든 발전기 완료! 탈출구가 열렸다.', true);
+  updateObjective();
+}
+
+function maybeAutoEscape() {
+  if (game.role !== 'survivor' || !game.gatesOpen || game.escaped) return;
+  if (game.myHealth === 'dead') return;
+  const now = Date.now();
+  if (now - view.escapeEmitAt < 1000) return;
+
+  const nearGate = (game.match?.gates || []).some((gate) => {
+    const dx = view.playerPos.x - gate.position.x;
+    const dz = view.playerPos.z - gate.position.z;
+    return Math.hypot(dx, dz) <= 3;
+  });
+  if (nearGate) {
+    view.escapeEmitAt = now;
+    net.socket?.emit('player:escape');
+  }
+}
+
+function onSurvivorEscaped(data) {
+  if (data.socketId === game.mySocketId) {
+    game.escaped = true;
+    feed('🏃 당신이 탈출했다!', true);
+    toast('탈출 성공! 매치 종료를 기다리는 중...');
+  } else {
+    const remote = view.remotes.get(data.socketId);
+    if (remote) {
+      remote.escaped = true;
+      remote.group.visible = false;
+    }
+    feed(`🏃 생존자 탈출 (${data.escapedCount}명)`, true);
+  }
+}
+
+// ===========================================================================
+// 원격 플레이어 수신 핸들러
+// ===========================================================================
+function onPlayerMoved(data) {
+  const remote = view.remotes.get(data.socketId);
+  if (!remote || !data.position) return;
+  remote.targetPos.set(data.position.x, 0, data.position.z);
+  if (typeof data.rotation?.y === 'number') {
+    remote.targetYaw = data.rotation.y;
+  }
+}
+
+function onPlayerLeft(data) {
+  const remote = view.remotes.get(data.socketId);
+  if (remote) {
+    view.scene?.remove(remote.group);
+    view.remotes.delete(data.socketId);
+  }
+  feed(`🚶 ${data.nickname || '플레이어'} 퇴장`);
+}
+
+// ===========================================================================
+// 부팅
+// ===========================================================================
+if (session.token && session.user) {
+  els.userChip.textContent = session.user.nickname || session.user.email;
+  els.userChip.classList.remove('hidden');
+  renderProfile(session.user);
+  enterLobby();
+} else {
+  setScreen('auth');
+}

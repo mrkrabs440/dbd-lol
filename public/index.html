@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DBD Clone — 비대칭 공포 멀티플레이어</title>
+  <meta name="description" content="살인마 1인 vs 생존자 3인. 발전기를 수리하고 탈출하라. (Three.js + Socket.io)" />
+  <link rel="stylesheet" href="/css/style.css" />
+
+  <!-- Socket.io 클라이언트 (서버가 서빙하는 UMD 빌드) -->
+  <script src="/socket.io/socket.io.js"></script>
+
+  <!-- Three.js ES 모듈 importmap -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.164.1/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.164.1/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="app">
+    <!-- 상단 바 -->
+    <header id="topbar">
+      <div class="brand">
+        <span class="brand-mark">☠</span>
+        <span class="brand-text">DBD <em>CLONE</em></span>
+      </div>
+      <div class="topbar-right">
+        <span id="conn-status" class="conn offline">연결 안 됨</span>
+        <span id="user-chip" class="user-chip hidden"></span>
+      </div>
+    </header>
+
+    <main id="main">
+      <!-- ============ 화면 1: 로그인 / 회원가입 ============ -->
+      <section id="screen-auth" class="screen active">
+        <div class="auth-card">
+          <h1 class="game-title">살인마 vs 생존자</h1>
+          <p class="game-subtitle">발전기 3대를 수리하고 탈출하라. 살인마는 그들을 모두 처치하라.</p>
+
+          <div class="tabs">
+            <button id="tab-login" class="tab active" type="button">로그인</button>
+            <button id="tab-register" class="tab" type="button">회원가입</button>
+          </div>
+
+          <form id="form-login" class="auth-form" autocomplete="on">
+            <label class="field">
+              <span>이메일</span>
+              <input id="login-email" type="email" placeholder="you@example.com" required />
+            </label>
+            <label class="field">
+              <span>비밀번호</span>
+              <input id="login-password" type="password" placeholder="8자 이상, 영문+숫자" required />
+            </label>
+            <button class="btn primary" type="submit">로그인</button>
+          </form>
+
+          <form id="form-register" class="auth-form hidden" autocomplete="on">
+            <label class="field">
+              <span>이메일</span>
+              <input id="reg-email" type="email" placeholder="you@example.com" required />
+            </label>
+            <label class="field">
+              <span>닉네임 (선택)</span>
+              <input id="reg-nickname" type="text" placeholder="2~20자" maxlength="20" />
+            </label>
+            <label class="field">
+              <span>비밀번호</span>
+              <input id="reg-password" type="password" placeholder="8자 이상, 영문+숫자" required />
+            </label>
+            <button class="btn primary" type="submit">회원가입</button>
+          </form>
+
+          <p id="auth-message" class="message"></p>
+
+          <div class="rule-box">
+            <h2>게임 규칙</h2>
+            <ul>
+              <li>생존자 3인: 발전기 3대를 100% 수리 → 탈출구 개방 → 탈출</li>
+              <li>살인마 1인: 이동 속도 1.25배, 클릭 공격(사거리 4)</li>
+              <li>생존자 피격: 건강 → 부상 → 빈사 → 사망</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 화면 2: 로비 / 매칭 대기 ============ -->
+      <section id="screen-lobby" class="screen">
+        <div class="lobby-grid">
+          <div class="card profile-card">
+            <h2>내 정보</h2>
+            <p class="profile-name" id="lobby-nickname">-</p>
+            <p class="profile-email" id="lobby-email">-</p>
+            <div class="stats-grid">
+              <div class="stat"><span class="stat-label">승리</span><span class="stat-value" id="stat-wins">0</span></div>
+              <div class="stat"><span class="stat-label">패배</span><span class="stat-value" id="stat-losses">0</span></div>
+              <div class="stat"><span class="stat-label">승률</span><span class="stat-value" id="stat-winrate">0%</span></div>
+              <div class="stat"><span class="stat-label">판수</span><span class="stat-value" id="stat-played">0</span></div>
+            </div>
+            <div class="row">
+              <button id="btn-refresh-profile" class="btn ghost" type="button">전적 새로고침</button>
+              <button id="btn-logout" class="btn ghost danger" type="button">로그아웃</button>
+            </div>
+          </div>
+
+          <div class="card match-card">
+            <h2>매치메이킹</h2>
+            <p class="match-desc">4명이 모이면 즉시 방이 생성되고, 서버 난수로 살인마 1인 / 생존자 3인이 정해집니다.</p>
+            <div class="row">
+              <button id="btn-find-match" class="btn primary big" type="button">매치 찾기 (4인)</button>
+              <button id="btn-cancel-match" class="btn ghost hidden" type="button">매칭 취소</button>
+            </div>
+            <div id="queue-panel" class="queue-panel hidden">
+              <div class="spinner"></div>
+              <p id="queue-status">대기열에 진입하는 중...</p>
+            </div>
+            <p id="lobby-message" class="message"></p>
+            <div class="controls-box">
+              <h3>조작법</h3>
+              <ul>
+                <li><b>WASD</b> 이동 / <b>마우스</b> 시점 / <b>클릭</b> 조준 잠금</li>
+                <li>생존자: 발전기 근처에서 <b>E</b> 키로 수리 (초당 5%)</li>
+                <li>살인마: <b>좌클릭</b> 공격 (사거리 4, 쿨다운 2.5초)</li>
+                <li>발전기 3대 완료 후 탈출구로 이동하면 탈출</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 화면 3: 인게임 HUD ============ -->
+      <section id="screen-game" class="screen">
+        <div id="game-container"></div>
+
+        <!-- 화면 비네팅 / 플래시 오버레이 -->
+        <div id="vignette" class="vignette"></div>
+        <div id="killer-vignette" class="vignette red hidden"></div>
+        <div id="damage-flash" class="flash red"></div>
+        <div id="event-flash" class="flash green"></div>
+
+        <!-- 정중앙 크로스헤어 -->
+        <div id="crosshair">+</div>
+        <div id="hitmarker" class="hidden">✕</div>
+
+        <!-- 역할 안내창 -->
+        <div id="hud-role" class="hud-role hidden">
+          <span id="role-title">생존자</span>
+          <span id="role-desc">발전기를 수리하고 탈출하라</span>
+        </div>
+
+        <!-- 목표 안내 -->
+        <div id="hud-objective" class="hud-objective">발전기 수리: 0 / 3</div>
+
+        <!-- 발전기 상태 목록 -->
+        <ul id="hud-generators" class="hud-generators"></ul>
+
+        <!-- 상호작용 프롬프트 -->
+        <div id="interact-prompt" class="interact-prompt hidden">발전기 수리 중... (E)</div>
+
+        <!-- 생존자 전용 수리 진행바 -->
+        <div id="repair-wrap" class="repair-wrap hidden">
+          <div class="repair-head">
+            <span id="repair-label">발전기 수리</span>
+            <span id="repair-text">0%</span>
+          </div>
+          <div id="repair-bar" class="repair-bar">
+            <div id="repair-fill" class="repair-fill"></div>
+          </div>
+        </div>
+
+        <!-- 살인마 전용 공격 쿨다운 -->
+        <div id="cooldown-wrap" class="cooldown-wrap hidden">
+          <div class="cooldown-head">
+            <span>공격</span>
+            <span id="cooldown-text">준비 완료</span>
+          </div>
+          <div class="cooldown-bar">
+            <div id="cooldown-fill" class="cooldown-fill"></div>
+          </div>
+        </div>
+
+        <!-- 체력 표시 -->
+        <div id="health-wrap" class="health-wrap hidden">
+          <span class="health-label">상태</span>
+          <span id="health-pips" class="health-pips"></span>
+        </div>
+
+        <!-- 킬피드 / 토스트 -->
+        <ul id="killfeed" class="killfeed"></ul>
+        <div id="toast" class="toast hidden"></div>
+
+        <!-- 조준 잠금 안내 -->
+        <div id="lock-hint" class="lock-hint">화면을 클릭하면 마우스가 잠기고 조작이 시작됩니다 (ESC: 해제)</div>
+
+        <!-- 매치 종료 오버레이 -->
+        <div id="match-end" class="match-end hidden">
+          <div class="end-card">
+            <h2 id="end-title">생존자 승리</h2>
+            <p id="end-reason">모든 생존자가 정리되었습니다.</p>
+            <ul id="end-players" class="end-players"></ul>
+            <div class="row center">
+              <button id="btn-back-lobby" class="btn primary" type="button">로비로 돌아가기</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script type="module" src="/js/client.js"></script>
+</body>
+</html>
