@@ -217,16 +217,10 @@ io.engine.on('connection_error', (err) => {
 });
 
 // ===========================================================================
-// 서버 부팅
+// 서버 부팅: 포트를 먼저 열어 Render 포트 감지를 통과시키고,
+// DB는 백그라운드에서 연결한다 (DB 없어도 /health 응답 가능)
 // ===========================================================================
 async function start() {
-  try {
-    await connectDB();
-  } catch (err) {
-    console.error('[Server] DB 연결 실패로 종료합니다:', err.message);
-    process.exit(1);
-  }
-
   httpServer.listen(PORT, HOST, () => {
     console.log('==============================================================');
     console.log('[Server] DBD Clone 백엔드 가동');
@@ -235,6 +229,21 @@ async function start() {
     console.log(`[Server] 정적 디렉토리: ${staticDir}`);
     console.log('==============================================================');
   });
+
+  try {
+    await connectDB();
+  } catch (err) {
+    console.error('[Server] DB 초기 연결 실패, 30초 간격으로 백그라운드 재시도:', err.message);
+    const retry = setInterval(async () => {
+      try {
+        await connectDB();
+        console.log('[Server] DB 백그라운드 재연결 성공.');
+        clearInterval(retry);
+      } catch (e) {
+        console.error('[Server] DB 재시도 실패:', e.message);
+      }
+    }, 30000);
+  }
 }
 
 // 예기치 않은 오류 로깅.
