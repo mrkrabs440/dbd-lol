@@ -9,5 +9,7 @@ services:
         value: production
       - key: JWT_SECRET
         generateValue: true
-      - key: MONGO_URI
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
         sync: false

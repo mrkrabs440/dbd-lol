@@ -1,260 +1,153 @@
 'use strict';
 
 // ===========================================================================
-// User 모델 (Mongoose 스키마)
+// User 스토어 (Supabase Postgres 백엔드)
 // ---------------------------------------------------------------------------
-// 요구 명세:
-//   - email, password, gameStats: { wins, losses }
-//   - bcryptjs 를 사용한 비밀번호 솔팅/해시화
-//   - 이메일 중복 방지(unique 인덱스) 및 형식 검증
-//
-// 보안 설계 포인트:
-//   1) password 필드는 `select: false` 로 설정하여 일반 조회 시 자동 제외합니다.
-//      (로그인 시에만 명시적으로 .select('+password') 로 가져옵니다.)
-//   2) pre('save') 훅에서 비밀번호가 변경(isModified)된 경우에만 해시하여
-//      중복 해싱을 방지합니다.
-//   3) comparePassword 인스턴스 메서드로 안전한 상수 시간 비교를 제공합니다.
-//   4) toJSON 변환 시 password 를 제거하여 응답 유출을 원천 차단합니다.
+// Mongoose 모델을 대체하는 Supabase 기반 저장소입니다.
+// 호출부 변경을 최소화하기 위해 DB snake_case 컬럼을 camelCase 객체로 변환해
+// 반환합니다 (id/email/nickname/isActive/gameStats/...).
+// 비밀번호 해시는 bcryptjs 로 처리합니다.
 // ===========================================================================
 
-const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
+const { getClient } = require('../config/db');
 
-const { Schema, model } = mongoose;
-
-// bcrypt 해싱 라운드 (환경 변수로 조정 가능, 기본 12)
 const SALT_ROUNDS = Number.parseInt(process.env.BCRYPT_SALT_ROUNDS, 10) || 12;
 
-// ---------------------------------------------------------------------------
-// gameStats 서브 스키마
-// ---------------------------------------------------------------------------
-const GameStatsSchema = new Schema(
-  {
-    wins: {
-      type: Number,
-      default: 0,
-      min: [0, '승리 횟수는 0 이상이어야 합니다.'],
-    },
-    losses: {
-      type: Number,
-      default: 0,
-      min: [0, '패배 횟수는 0 이상이어야 합니다.'],
-    },
-    // 확장 통계(선택): 킬/생존/발전기 수리 등 세부 지표
-    matchesPlayed: {
-      type: Number,
-      default: 0,
-      min: 0,
-    },
-    generatorsRepaired: {
-      type: Number,
-      default: 0,
-      min: 0,
-    },
-    survivorsSacrificed: {
-      type: Number,
-      default: 0,
-      min: 0,
-    },
-    escapes: {
-      type: Number,
-      default: 0,
-      min: 0,
-    },
-  },
-  { _id: false }
-);
-
-// ---------------------------------------------------------------------------
-// User 스키마 정의
-// ---------------------------------------------------------------------------
-const UserSchema = new Schema(
-  {
-    email: {
-      type: String,
-      required: [true, '이메일은 필수 입력 항목입니다.'],
-      unique: true,
-      lowercase: true,
-      trim: true,
-      index: true,
-      match: [
-        /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
-        '올바른 이메일 형식이 아닙니다.',
-      ],
-      maxlength: [254, '이메일이 너무 깁니다.'],
-    },
-
-    password: {
-      type: String,
-      required: [true, '비밀번호는 필수 입력 항목입니다.'],
-      minlength: [8, '비밀번호는 최소 8자 이상이어야 합니다.'],
-      maxlength: [72, '비밀번호는 최대 72자까지 가능합니다.'], // bcrypt 입력 한계
-      select: false, // 기본 조회 시 제외
-    },
-
-    // 표시용 닉네임 (선택). 미입력 시 이메일 앞부분으로 자동 생성됩니다.
-    nickname: {
-      type: String,
-      trim: true,
-      maxlength: [20, '닉네임은 최대 20자까지 가능합니다.'],
-      default: null,
-    },
-
+// Supabase 행 → camelCase 사용자 객체
+function toUser(row, withPassword = false) {
+  if (!row) return null;
+  const u = {
+    id: row.id,
+    email: row.email,
+    nickname: row.nickname,
+    isActive: row.is_active,
+    lastLoginAt: row.last_login_at,
+    createdAt: row.created_at,
     gameStats: {
-      type: GameStatsSchema,
-      default: () => ({}),
+      wins: row.wins || 0,
+      losses: row.losses || 0,
+      matchesPlayed: row.matches_played || 0,
+      generatorsRepaired: row.generators_repaired || 0,
+      survivorsSacrificed: row.survivors_sacrificed || 0,
+      escapes: row.escapes || 0,
     },
-
-    // 계정 상태 관리
-    isActive: {
-      type: Boolean,
-      default: true,
-    },
-
-    lastLoginAt: {
-      type: Date,
-      default: null,
-    },
-  },
-  {
-    // createdAt / updatedAt 자동 생성
-    timestamps: true,
-    // toJSON / toObject 시 가상 필드 포함
-    toJSON: { virtuals: true, transform: transformUser },
-    toObject: { virtuals: true, transform: transformUser },
-  }
-);
-
-// ---------------------------------------------------------------------------
-// 인덱스
-// ---------------------------------------------------------------------------
-// email 유일 인덱스는 위 unique: true 로 자동 생성되므로 여기 중복 선언 금지
-// (중복 시 Mongoose "Duplicate schema index" 경고 발생)
-
-// ---------------------------------------------------------------------------
-// 가상 필드: 승률
-// ---------------------------------------------------------------------------
-UserSchema.virtual('winRate').get(function () {
-  const total = (this.gameStats?.wins || 0) + (this.gameStats?.losses || 0);
-  if (total === 0) return 0;
-  return Number(((this.gameStats.wins / total) * 100).toFixed(2));
-});
-
-// ---------------------------------------------------------------------------
-// toJSON / toObject 변환 함수: 민감 정보 제거
-// ---------------------------------------------------------------------------
-function transformUser(_doc, ret) {
-  delete ret.password;
-  delete ret.__v;
-  return ret;
+  };
+  if (withPassword) u.passwordHash = row.password_hash;
+  return u;
 }
 
-// ---------------------------------------------------------------------------
-// 미들웨어: 비밀번호 해싱 (save 이전)
-// ---------------------------------------------------------------------------
-UserSchema.pre('save', async function hashPassword(next) {
-  try {
-    // 비밀번호가 변경되지 않았으면 그대로 진행 (중복 해싱 방지)
-    if (!this.isModified('password')) {
-      return next();
-    }
-
-    // bcryptjs: 자동으로 랜덤 솔트를 생성하여 해시 (내장 salt)
-    const salt = await bcrypt.genSalt(SALT_ROUNDS);
-    this.password = await bcrypt.hash(this.password, salt);
-
-    return next();
-  } catch (err) {
-    return next(err);
-  }
-});
-
-// 닉네임 자동 생성: 저장 직전에 비어 있으면 이메일 로컬 파트 사용
-UserSchema.pre('save', function assignNickname(next) {
-  if (!this.nickname && this.email) {
-    this.nickname = this.email.split('@')[0].slice(0, 20);
-  }
-  next();
-});
-
-// ---------------------------------------------------------------------------
-// 인스턴스 메서드: 비밀번호 비교
-// ---------------------------------------------------------------------------
-UserSchema.methods.comparePassword = async function comparePassword(
-  candidatePassword
-) {
-  // this.password 는 로그인 시 .select('+password') 로 로드되어 있어야 합니다.
-  if (!this.password) {
-    throw new Error(
-      '비밀번호 필드가 로드되지 않았습니다. .select("+password") 를 사용하세요.'
-    );
-  }
-  return bcrypt.compare(candidatePassword, this.password);
-};
-
-// ---------------------------------------------------------------------------
-// 인스턴스 메서드: 공개 프로필 반환
-// ---------------------------------------------------------------------------
-UserSchema.methods.toPublicProfile = function toPublicProfile() {
+function toPublicProfile(u) {
+  if (!u) return null;
+  const wins = u.gameStats?.wins || 0;
+  const losses = u.gameStats?.losses || 0;
+  const total = wins + losses;
   return {
-    id: this._id,
-    email: this.email,
-    nickname: this.nickname,
+    id: u.id,
+    email: u.email,
+    nickname: u.nickname,
     gameStats: {
-      wins: this.gameStats?.wins || 0,
-      losses: this.gameStats?.losses || 0,
-      matchesPlayed: this.gameStats?.matchesPlayed || 0,
-      generatorsRepaired: this.gameStats?.generatorsRepaired || 0,
-      survivorsSacrificed: this.gameStats?.survivorsSacrificed || 0,
-      escapes: this.gameStats?.escapes || 0,
+      wins,
+      losses,
+      matchesPlayed: u.gameStats?.matchesPlayed || 0,
+      generatorsRepaired: u.gameStats?.generatorsRepaired || 0,
+      survivorsSacrificed: u.gameStats?.survivorsSacrificed || 0,
+      escapes: u.gameStats?.escapes || 0,
     },
-    winRate: this.winRate,
-    createdAt: this.createdAt,
-    lastLoginAt: this.lastLoginAt,
+    winRate: total === 0 ? 0 : Number(((wins / total) * 100).toFixed(2)),
+    createdAt: u.createdAt,
+    lastLoginAt: u.lastLoginAt,
   };
+}
+
+async function findByEmail(email, withPassword = false) {
+  const cols = withPassword ? '*' : 'id,email,nickname,is_active,last_login_at,created_at,wins,losses,matches_played,generators_repaired,survivors_sacrificed,escapes';
+  const { data, error } = await getClient()
+    .from('users')
+    .select(cols)
+    .eq('email', String(email).toLowerCase().trim())
+    .maybeSingle();
+  if (error) throw error;
+  return toUser(data, withPassword);
+}
+
+async function findById(id) {
+  const { data, error } = await getClient()
+    .from('users')
+    .select('id,email,nickname,is_active,last_login_at,created_at,wins,losses,matches_played,generators_repaired,survivors_sacrificed,escapes')
+    .eq('id', id)
+    .maybeSingle();
+  if (error) throw error;
+  return toUser(data, false);
+}
+
+async function create({ email, password, nickname }) {
+  const cleanEmail = String(email).toLowerCase().trim();
+  const hash = await bcrypt.hash(password, await bcrypt.genSalt(SALT_ROUNDS));
+  const { data, error } = await getClient()
+    .from('users')
+    .insert({
+      email: cleanEmail,
+      password_hash: hash,
+      nickname: nickname && nickname.trim() ? nickname.trim() : cleanEmail.split('@')[0].slice(0, 20),
+    })
+    .select('id,email,nickname,is_active,last_login_at,created_at,wins,losses,matches_played,generators_repaired,survivors_sacrificed,escapes')
+    .single();
+  if (error) throw error; // 이메일 중복 시 code '23505'
+  return toUser(data, false);
+}
+
+async function verifyPassword(userWithHash, candidatePassword) {
+  if (!userWithHash || !userWithHash.passwordHash) {
+    throw new Error('비밀번호 해시가 로드되지 않았습니다.');
+  }
+  return bcrypt.compare(candidatePassword, userWithHash.passwordHash);
+}
+
+async function touchLogin(id) {
+  await getClient().from('users').update({ last_login_at: new Date().toISOString() }).eq('id', id);
+}
+
+async function updateNickname(id, nickname) {
+  const { data, error } = await getClient()
+    .from('users')
+    .update({ nickname })
+    .eq('id', id)
+    .select('id,email,nickname,is_active,last_login_at,created_at,wins,losses,matches_played,generators_repaired,survivors_sacrificed,escapes')
+    .single();
+  if (error) throw error;
+  return toUser(data, false);
+}
+
+async function recordMatchResult(userId, { win, generatorsRepaired = 0, survivorsSacrificed = 0, escaped = false }) {
+  const { data: cur, error: readErr } = await getClient()
+    .from('users')
+    .select('wins,losses,matches_played,generators_repaired,survivors_sacrificed,escapes')
+    .eq('id', userId)
+    .maybeSingle();
+  if (readErr) throw readErr;
+  if (!cur) return null;
+  const patch = {
+    wins: (cur.wins || 0) + (win ? 1 : 0),
+    losses: (cur.losses || 0) + (win ? 0 : 1),
+    matches_played: (cur.matches_played || 0) + 1,
+    generators_repaired: (cur.generators_repaired || 0) + (generatorsRepaired || 0),
+    survivors_sacrificed: (cur.survivors_sacrificed || 0) + (survivorsSacrificed || 0),
+    escapes: (cur.escapes || 0) + (escaped ? 1 : 0),
+  };
+  const { error: upErr } = await getClient().from('users').update(patch).eq('id', userId);
+  if (upErr) throw upErr;
+  return patch;
+}
+
+module.exports = {
+  findByEmail,
+  findById,
+  create,
+  verifyPassword,
+  touchLogin,
+  updateNickname,
+  recordMatchResult,
+  toPublicProfile,
+  SALT_ROUNDS,
 };
-
-// ---------------------------------------------------------------------------
-// 정적 메서드: 이메일로 사용자 조회 (비밀번호 포함 옵션)
-// ---------------------------------------------------------------------------
-UserSchema.statics.findByEmail = function findByEmail(email, withPassword = false) {
-  const query = this.findOne({ email: String(email).toLowerCase().trim() });
-  if (withPassword) {
-    query.select('+password');
-  }
-  return query.exec();
-};
-
-// ---------------------------------------------------------------------------
-// 정적 메서드: 전적 업데이트
-// ---------------------------------------------------------------------------
-UserSchema.statics.recordMatchResult = function recordMatchResult(
-  userId,
-  { win, generatorsRepaired = 0, survivorsSacrificed = 0, escaped = false }
-) {
-  const inc = { 'gameStats.matchesPlayed': 1 };
-  inc[win ? 'gameStats.wins' : 'gameStats.losses'] = 1;
-  if (generatorsRepaired) {
-    inc['gameStats.generatorsRepaired'] = generatorsRepaired;
-  }
-  if (survivorsSacrificed) {
-    inc['gameStats.survivorsSacrificed'] = survivorsSacrificed;
-  }
-  if (escaped) {
-    inc['gameStats.escapes'] = 1;
-  }
-
-  return this.findByIdAndUpdate(
-    userId,
-    { $inc: inc },
-    { new: true, runValidators: true }
-  ).exec();
-};
-
-// ---------------------------------------------------------------------------
-// 모델 생성 및 내보내기
-// ---------------------------------------------------------------------------
-const User = mongoose.models.User || model('User', UserSchema);
-
-module.exports = User;
-module.exports.SALT_ROUNDS = SALT_ROUNDS;

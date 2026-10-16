@@ -22,7 +22,7 @@ const DEMO_USERS = [
 async function seed() {
   await connectDB();
   for (const demo of DEMO_USERS) {
-    const existing = await User.findOne({ email: demo.email }).lean();
+    const existing = await User.findByEmail(demo.email);
     if (existing) {
       console.log(`[Seed] 존재함 → 건너뜀: ${demo.email}`);
       continue;

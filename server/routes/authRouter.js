@@ -61,7 +61,7 @@ function authSuccessPayload(user, token) {
     success: true,
     token,
     tokenType: 'Bearer',
-    user: user.toPublicProfile ? user.toPublicProfile() : user,
+    user: User.toPublicProfile(user),
   };
 }
 
@@ -110,7 +110,7 @@ router.post(
           : null;
 
       // 2) 이메일 중복 검사 (1차: 빠른 조회)
-      const existing = await User.findOne({ email }).lean();
+      const existing = await User.findByEmail(email);
       if (existing) {
         return res.status(409).json({
           success: false,
@@ -119,15 +119,8 @@ router.post(
         });
       }
 
-      // 3) 사용자 생성 (password 는 pre('save') 훅에서 bcrypt 해싱됨)
-      const user = new User({
-        email,
-        password,
-        nickname,
-        gameStats: { wins: 0, losses: 0 },
-      });
-
-      await user.save();
+      // 3) 사용자 생성 (모델 내부에서 bcrypt 해싱됨)
+      const user = await User.create({ email, password, nickname });
 
       // 4) JWT 발급 (payload 에 유저 _id 포함)
       const token = signToken(user);
@@ -135,25 +128,12 @@ router.post(
       // 5) 응답 (password 는 toPublicProfile / toJSON 에서 제외됨)
       return res.status(201).json(authSuccessPayload(user, token));
     } catch (err) {
-      // 6) unique 인덱스 경합(동시 요청)으로 인한 중복 키 에러 처리
-      if (err && err.code === 11000) {
+      // unique 제약 경합(동시 요청)으로 인한 중복 키 에러 처리 (Postgres 23505)
+      if (err && err.code === '23505') {
         return res.status(409).json({
           success: false,
           message: '이미 가입된 이메일입니다.',
           code: 'EMAIL_ALREADY_EXISTS',
-        });
-      }
-
-      // Mongoose 유효성 오류
-      if (err && err.name === 'ValidationError') {
-        return res.status(400).json({
-          success: false,
-          message: '입력값이 올바르지 않습니다.',
-          code: 'VALIDATION_ERROR',
-          errors: Object.values(err.errors).map((e) => ({
-            field: e.path,
-            message: e.message,
-          })),
         });
       }
 
@@ -201,7 +181,7 @@ router.post(
       }
 
       // 3) 비밀번호 검증
-      const isMatch = await user.comparePassword(password);
+      const isMatch = await User.verifyPassword(user, password);
       if (!isMatch) {
         return res.status(401).json({
           success: false,
@@ -220,8 +200,7 @@ router.post(
       }
 
       // 5) 최근 로그인 시각 갱신
-      user.lastLoginAt = new Date();
-      await user.save({ validateBeforeSave: false });
+      await User.touchLogin(user.id);
 
       // 6) JWT 발급
       const token = signToken(user);
@@ -240,7 +219,7 @@ router.get('/me', protect, async (req, res, next) => {
   try {
     return res.status(200).json({
       success: true,
-      user: req.user.toPublicProfile(),
+      user: User.toPublicProfile(req.user),
     });
   } catch (err) {
     return next(err);
@@ -264,12 +243,11 @@ router.patch(
       const validationError = handleValidation(req, res);
       if (validationError) return validationError;
 
-      req.user.nickname = req.body.nickname.trim();
-      await req.user.save({ validateBeforeSave: false });
+      req.user = await User.updateNickname(req.user.id, req.body.nickname.trim());
 
       return res.status(200).json({
         success: true,
-        user: req.user.toPublicProfile(),
+        user: User.toPublicProfile(req.user),
       });
     } catch (err) {
       return next(err);

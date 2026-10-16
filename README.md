@@ -41,7 +41,8 @@ dbd-clone/
 
 ```bash
 npm install
-cp .env.example .env   # MONGO_URI / JWT_SECRET 설정
+cp .env.example .env   # SUPABASE_URL / SUPABASE_SERVICE_KEY / JWT_SECRET 설정
+# Supabase 대시보드 → SQL Editor에서 server/supabase/schema.sql 실행 (users 테이블 생성)
 npm run seed           # (선택) 데모 계정 생성
 npm start              # http://localhost:3000
 ```

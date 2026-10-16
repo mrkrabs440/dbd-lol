@@ -28,14 +28,14 @@ if (
 
 /**
  * 사용자 객체 기반으로 JWT 토큰을 발급합니다.
- * @param {{ _id: any, email: string, nickname?: string }} user
+ * @param {{ id: any, email: string, nickname?: string }} user
  * @param {object} [options] 추가 옵션 (expiresIn 등)
  * @returns {string} 서명된 JWT
  */
 function signToken(user, options = {}) {
   // 페이로드에는 최소한의 식별 정보만 담습니다(비밀번호 등 절대 포함 금지).
   const payload = {
-    sub: String(user._id), // subject = 유저 고유 _id (Mongo ObjectId)
+    sub: String(user.id || user._id), // subject = 유저 고유 id
     email: user.email,
     nickname: user.nickname || null,
   };

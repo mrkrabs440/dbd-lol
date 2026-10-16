@@ -56,7 +56,7 @@ function socketAuthMiddleware(req, next) {
       }
 
       // DB 에서 최신 사용자 확인
-      const user = await User.findById(decoded.sub).lean();
+      const user = await User.findById(decoded.sub);
       if (!user) {
         const err = new Error('토큰에 해당하는 사용자를 찾을 수 없습니다.');
         err.data = { code: 'USER_NOT_FOUND', status: 401 };
@@ -71,12 +71,12 @@ function socketAuthMiddleware(req, next) {
 
       // 소켓 객체에 인증 정보 주입 (이후 모든 핸들러에서 사용 가능)
       req.user = {
-        id: String(user._id),
+        id: user.id,
         email: user.email,
         nickname: user.nickname,
         gameStats: user.gameStats,
       };
-      req.userId = String(user._id);
+      req.userId = user.id;
 
       return next();
     } catch (err) {
