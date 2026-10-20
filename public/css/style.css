@@ -853,3 +853,87 @@ body {
 
 .test-row { margin-top: 10px; gap: 8px; }
 .match-desc.small { font-size: 12px; opacity: 0.75; margin: 6px 0 0; }
+
+/* ===========================================================================
+   체력바 / 스태미나 / 처형 연출
+   =========================================================================== */
+.health-bar {
+  width: 190px;
+  height: 8px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+.health-fill {
+  height: 100%;
+  width: 100%;
+  border-radius: 5px;
+  background: linear-gradient(90deg, #3ad07a, #7ce89a);
+  transition: width 0.25s ease, background 0.25s ease;
+}
+.health-bar[data-state="injured"] .health-fill { background: linear-gradient(90deg, #e0a53a, #ffcf6b); }
+.health-bar[data-state="dying"] .health-fill { background: linear-gradient(90deg, #d0342f, #ff6b5c); }
+.health-bar[data-state="dead"] .health-fill { background: #3a3a3a; }
+
+.stamina-wrap {
+  position: absolute;
+  left: 50%;
+  bottom: 26px;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+.stamina-bar {
+  width: 220px;
+  height: 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+.stamina-fill {
+  height: 100%;
+  width: 100%;
+  background: linear-gradient(90deg, #4aa8ff, #9fd6ff);
+  transition: width 0.1s linear;
+}
+.stamina-wrap.empty .stamina-fill { background: linear-gradient(90deg, #d0342f, #ff7a6b); }
+
+.exec-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background: radial-gradient(circle at 50% 50%, rgba(120, 0, 10, 0) 30%, rgba(90, 0, 6, 0.55) 100%);
+  animation: exec-flash 0.5s ease-out;
+}
+.exec-overlay span {
+  font-size: 54px;
+  font-weight: 900;
+  letter-spacing: 8px;
+  color: #ff3b3b;
+  text-shadow: 0 0 24px rgba(255, 0, 0, 0.8);
+  opacity: 0.9;
+}
+@keyframes exec-flash {
+  0% { opacity: 0; }
+  20% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+.map-tag {
+  position: absolute;
+  top: 14px;
+  right: 18px;
+  padding: 5px 12px;
+  border-radius: 18px;
+  background: rgba(10, 12, 16, 0.7);
+  border: 1px solid rgba(160, 180, 210, 0.28);
+  color: #b9c6d6;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  pointer-events: none;
+}

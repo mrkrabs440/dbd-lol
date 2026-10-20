@@ -123,6 +123,52 @@ const TEST_BOT_TICK_MS = 400;
 const TEST_SURVIVOR_NAMES = Object.freeze(['BOT_훈련병', 'BOT_복사본', 'BOT_신병']);
 const TEST_KILLER_NAME = 'BOT_살인마';
 
+// --- 맵 컨cept ---
+// 방마다 이 중 하나가 배정된다(서버가 랜덤 선택). 발전기/게이트 좌표도 컨셉별 상이.
+const MAP_CONCEPTS = Object.freeze([
+  { id: 'ruins', name: '폐허 학교' },
+  { id: 'forest', name: '월동 숲' },
+  { id: 'factory', name: '폐공장' },
+]);
+const MAP_CONCEPT_IDS = Object.freeze(MAP_CONCEPTS.map((c) => c.id));
+const CONCEPT_LAYOUT = Object.freeze({
+  ruins: {
+    generators: [
+      { x: -20, y: 0, z: -20 },
+      { x: 20, y: 0, z: -20 },
+      { x: 0, y: 0, z: 21 },
+    ],
+    gates: [
+      { x: 0, y: 0, z: -28 },
+      { x: 0, y: 0, z: 28 },
+    ],
+  },
+  forest: {
+    generators: [
+      { x: -22, y: 0, z: -6 },
+      { x: 22, y: 0, z: 6 },
+      { x: 0, y: 0, z: -24 },
+    ],
+    gates: [
+      { x: -26, y: 0, z: 18 },
+      { x: 26, y: 0, z: -18 },
+    ],
+  },
+  factory: {
+    generators: [
+      { x: -18, y: 0, z: -22 },
+      { x: 18, y: 0, z: -22 },
+      { x: 0, y: 0, z: 24 },
+    ],
+    gates: [
+      { x: 0, y: 0, z: -28 },
+      { x: 26, y: 0, z: 26 },
+    ],
+  },
+});
+// 생존자 달리기 최대 속도(서버 검증용). 클라가 sprint 플래그를 보내면 더 허용.
+const SURVIVOR_SPRINT_MAX_SPEED = 7.2;
+
 // --- 승패 판정 ---
 // 모든 생존자가 (탈출 또는 사망) 으로 정리되면 매치 종료.
 // 탈출자가 1명 이상이면 생존자 승, 아니면 살인마 승.
@@ -158,4 +204,8 @@ module.exports = {
   TEST_BOT_TICK_MS,
   TEST_SURVIVOR_NAMES,
   TEST_KILLER_NAME,
+  MAP_CONCEPTS,
+  MAP_CONCEPT_IDS,
+  CONCEPT_LAYOUT,
+  SURVIVOR_SPRINT_MAX_SPEED,
 };

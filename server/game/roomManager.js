@@ -39,6 +39,9 @@ const {
   TEST_BOT_TICK_MS,
   TEST_SURVIVOR_NAMES,
   TEST_KILLER_NAME,
+  MAP_CONCEPT_IDS,
+  CONCEPT_LAYOUT,
+  SURVIVOR_SPRINT_MAX_SPEED,
 } = require('./constants');
 
 // 매치 제한 시간(10분). 초과 시 살인마 승리로 종료한다.
@@ -65,10 +68,13 @@ const ROLE_MAX_SPEED = Object.freeze({
   [ROLES.KILLER]: 4.5 * 1.25,
 });
 // 현재 시점에 플레이어에게 적용되는 최대 이동 속도(돌진 버프 반영).
-function maxSpeedFor(player, now = Date.now()) {
+function maxSpeedFor(player, now = Date.now(), sprinting = false) {
   const base = ROLE_MAX_SPEED[player.role] || ROLE_MAX_SPEED[ROLES.SURVIVOR];
   if (player.role === ROLES.KILLER && player.chaseUntil && player.chaseUntil > now) {
     return base * CHASE_SPEED_MULTIPLIER;
+  }
+  if (player.role === ROLES.SURVIVOR && sprinting) {
+    return Math.max(base, SURVIVOR_SPRINT_MAX_SPEED);
   }
   return base;
 }
@@ -151,8 +157,11 @@ class GameRoom {
     this.isTest = false;
     this.testRole = null;
     this.botTimer = null;
+    // 맵 컨셉 랜덤 배정
+    this.mapConcept = MAP_CONCEPT_IDS[Math.floor(Math.random() * MAP_CONCEPT_IDS.length)];
+    this.layout = CONCEPT_LAYOUT[this.mapConcept] || CONCEPT_LAYOUT.ruins;
 
-    GENERATOR_POSITIONS.slice(0, 3).forEach((position, index) => {
+    (this.layout.generators).slice(0, 3).forEach((position, index) => {
       const generatorId = `gen_${index + 1}`;
       this.generators.set(generatorId, {
         id: generatorId,
@@ -235,11 +244,12 @@ class GameRoom {
         progress: g.progress,
         completed: g.completed,
       })),
-      gates: EXIT_GATE_POSITIONS.map((position, index) => ({
+      gates: (this.layout.gates).map((position, index) => ({
         id: `gate_${index + 1}`,
         position: { ...position },
         open: this.gatesOpen,
       })),
+      mapConcept: this.mapConcept,
       rules: {
         matchSize: MATCH_SIZE,
         survivors: SURVIVORS_PER_MATCH,
@@ -835,7 +845,7 @@ class RoomManager {
     // 순간이동 핵 방지: 역할 최대 속도 기반 허용 거리 계산.
     const elapsedSec = player.lastMoveAt === 0 ? 0 : (now - player.lastMoveAt) / 1000;
     if (elapsedSec > 0) {
-      const maxSpeed = maxSpeedFor(player, now);
+      const maxSpeed = maxSpeedFor(player, now, !!data?.sprint);
       const allowed = maxSpeed * elapsedSec * MOVE_TOLERANCE_MULTIPLIER + MOVE_BASE_SLACK;
       const moved = distance3D(player.position, position);
       if (moved > allowed) {
@@ -932,7 +942,7 @@ class RoomManager {
       if (room.allGeneratorsCompleted() && !room.gatesOpen) {
         room.gatesOpen = true;
         this.io.to(room.id).emit('gates:opened', {
-          gates: EXIT_GATE_POSITIONS.map((position, index) => ({
+          gates: (room.layout?.gates || EXIT_GATE_POSITIONS).map((position, index) => ({
             id: `gate_${index + 1}`,
             position: { ...position },
             open: true,
@@ -1048,7 +1058,7 @@ class RoomManager {
       return;
     }
 
-    const nearGate = EXIT_GATE_POSITIONS.some(
+    const nearGate = (room.layout?.gates || EXIT_GATE_POSITIONS).some(
       (gate) => distance3D(player.position, gate) <= ESCAPE_RADIUS
     );
     if (!nearGate) {

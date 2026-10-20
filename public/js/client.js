@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { makeHumanoid, animateHumanoid, animateExecution } from './rig.js';
+import { MAP_CONCEPTS, getConcept } from './maps.js';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 
 // ===========================================================================
@@ -41,6 +43,7 @@ const els = {
   roleTitle: $('role-title'),
   roleDesc: $('role-desc'),
   objective: $('hud-objective'),
+  mapTag: $('map-tag'),
   generators: $('hud-generators'),
   crosshair: $('crosshair'),
   hitmarker: $('hitmarker'),
@@ -58,6 +61,13 @@ const els = {
   cooldownFill: $('cooldown-fill'),
   cooldownText: $('cooldown-text'),
   healthWrap: $('health-wrap'),
+  healthBar: $('health-bar'),
+  healthFill: $('health-fill'),
+  staminaWrap: $('stamina-wrap'),
+  staminaFill: $('stamina-fill'),
+  execOverlay: $('exec-overlay'),
+  stunTag: $('stun-tag'),
+  chaseTag: $('chase-tag'),
   healthPips: $('health-pips'),
   killfeed: $('killfeed'),
   toast: $('toast'),
@@ -107,6 +117,11 @@ const game = {
   stunnedUntil: 0,
   blindedUntil: 0,
   isTest: false,
+  // 처형(내치기) 연출
+  executing: false,
+  execT: 0,
+  execTarget: null,
+  execBy: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -122,7 +137,19 @@ const view = {
   keys: new Set(),
   playerPos: new THREE.Vector3(0, 1.7, 0),
   eyeHeight: 1.7,
-  baseSpeed: 4.0,
+  baseSpeed: 3.2,
+  walkSpeed: 3.2,
+  runSpeed: 6.4,
+  crouchSpeed: 1.7,
+  velocity: new THREE.Vector3(),
+  sprinting: false,
+  stamina: 100,
+  staminaMax: 100,
+  staminaDrain: 22,
+  staminaRegen: 16,
+  bobPhase: 0,
+  bobAmount: 0,
+  landShake: 0,
   moveAccum: 0,
   remotes: new Map(),
   generators: new Map(),
@@ -549,8 +576,8 @@ function startMatch(snapshot) {
   els.roleTitle.className = isKiller ? 'killer' : 'survivor';
   els.roleTitle.id = 'role-title';
   els.roleDesc.textContent = isKiller
-    ? '생존자를 모두 처치하라 (좌클릭 공격)'
-    : '발전기 3대를 수리하고 탈출하라 (E 수리)';
+    ? '생존자를 모두 처치하라 (좌클릭 공격) · Q/F/E 스킬'
+    : '발전기 3대를 수리하고 탈출하라 (E 수리) · Shift 달리기';
   els.killerVignette.classList.toggle('hidden', !isKiller);
   els.repairWrap.classList.toggle('hidden', isKiller);
   els.cooldownWrap.classList.toggle('hidden', !isKiller);
@@ -562,10 +589,16 @@ function startMatch(snapshot) {
   game.chaseUntil = 0;
   game.stunnedUntil = 0;
   game.blindedUntil = 0;
+  game.execT = 0;
+  view.stamina = view.staminaMax;
   view.chaseUntil = 0;
   view.blindUntil = 0;
   game.isTest = !!snapshot.isTest;
   if (els.skillWrap) els.skillWrap.classList.toggle('hidden', !isKiller);
+  if (els.staminaWrap) els.staminaWrap.classList.toggle('hidden', isKiller);
+  if (els.healthWrap) els.healthWrap.classList.toggle('hidden', isKiller);
+  if (els.execOverlay) els.execOverlay.classList.add('hidden');
+  updateHealthBar();
   if (isKiller) buildSkillBar();
   updateObjective();
   updateHealthUI();
@@ -665,6 +698,24 @@ function onPlayerEffect(data) {
     game.blindedUntil = data.until || Date.now() + 4000;
     view.blindUntil = game.blindedUntil;
     toast('암전! 시야가 막혔다');
+  }
+}
+
+function updateHealthBar() {
+  if (!els.healthFill) return;
+  const state = game.myHealth;
+  const pct = state === 'healthy' ? 100 : state === 'injured' ? 66 : state === 'dying' ? 33 : 0;
+  els.healthFill.style.width = `${pct}%`;
+  if (els.healthBar) {
+    els.healthBar.dataset.state = state;
+  }
+}
+
+function updateStaminaUI() {
+  if (!els.staminaFill) return;
+  els.staminaFill.style.width = `${Math.round(view.stamina)}%`;
+  if (els.staminaWrap) {
+    els.staminaWrap.classList.toggle('empty', view.stamina < 12);
   }
 }
 
@@ -853,66 +904,172 @@ function onResize() {
 function buildMap(scene, snapshot) {
   view.colliders = [];
 
-  // 바닥 (60 x 60)
+  // 서버가 배정한 맵 컨셉(없으면 기본값)
+  const concept = getConcept(snapshot.mapConcept);
+  game.mapConcept = concept.id;
+  game.mapName = concept.name;
+
+  // --- 안개/조명 ---
+  scene.background = new THREE.Color(concept.fog);
+  scene.fog = new THREE.FogExp2(concept.fog, concept.fogDensity);
+  scene.add(new THREE.AmbientLight(concept.ambient, concept.ambientIntensity));
+  scene.add(new THREE.HemisphereLight(concept.hemi, 0x0a0a0a, 0.45));
+
+  // --- 바닥 ---
   const floor = new THREE.Mesh(
     new THREE.PlaneGeometry(60, 60),
-    new THREE.MeshStandardMaterial({ color: 0x0b0b0d, roughness: 1, metalness: 0 })
+    new THREE.MeshStandardMaterial({
+      color: concept.floor,
+      roughness: concept.floorRough,
+      metalness: 0.05,
+    })
   );
   floor.rotation.x = -Math.PI / 2;
   floor.receiveShadow = true;
   scene.add(floor);
 
-  // 희미한 격자 (방향 감각용, 매우 어둡게)
-  const grid = new THREE.GridHelper(60, 30, 0x1a1c22, 0x101216);
-  grid.position.y = 0.01;
+  // 희미한 격자(방향 감각)
+  const grid = new THREE.GridHelper(60, 30, 0x1e2028, 0x121419);
+  grid.position.y = 0.012;
   grid.material.transparent = true;
-  grid.material.opacity = 0.35;
+  grid.material.opacity = 0.22;
   scene.add(grid);
 
-  // 외곽 벽
-  const wallMat = new THREE.MeshStandardMaterial({ color: 0x14151a, roughness: 0.95 });
-  const wallGeoLong = new THREE.BoxGeometry(62, 4, 1);
-  const wallGeoSide = new THREE.BoxGeometry(1, 4, 62);
+  // --- 외곽 벽 ---
+  const wallMat = new THREE.MeshStandardMaterial({ color: concept.wall, roughness: 0.95 });
+  const wallGeoLong = new THREE.BoxGeometry(62, concept.wallHeight, 1);
+  const wallGeoSide = new THREE.BoxGeometry(1, concept.wallHeight, 62);
   const walls = [
-    { geo: wallGeoLong, pos: [0, 2, -30.5] },
-    { geo: wallGeoLong, pos: [0, 2, 30.5] },
-    { geo: wallGeoSide, pos: [-30.5, 2, 0] },
-    { geo: wallGeoSide, pos: [30.5, 2, 0] },
+    { geo: wallGeoLong, pos: [0, concept.wallHeight / 2, -30.5] },
+    { geo: wallGeoLong, pos: [0, concept.wallHeight / 2, 30.5] },
+    { geo: wallGeoSide, pos: [-30.5, concept.wallHeight / 2, 0] },
+    { geo: wallGeoSide, pos: [30.5, concept.wallHeight / 2, 0] },
   ];
   for (const wall of walls) {
     const mesh = new THREE.Mesh(wall.geo, wallMat);
     mesh.position.set(...wall.pos);
+    mesh.receiveShadow = true;
     scene.add(mesh);
   }
 
-  // 장애물 상자 (고정 배치, 결정적)
-  const obstacles = [
-    { x: -8, z: -6, w: 3, h: 2.2, d: 3 },
-    { x: 8, z: -6, w: 3, h: 2.2, d: 3 },
-    { x: -8, z: 8, w: 4, h: 1.6, d: 2 },
-    { x: 8, z: 8, w: 4, h: 1.6, d: 2 },
-    { x: 0, z: 0, w: 2.4, h: 2.6, d: 2.4 },
-    { x: -14, z: 2, w: 2, h: 1.4, d: 5 },
-    { x: 14, z: 2, w: 2, h: 1.4, d: 5 },
-  ];
-  const crateMat = new THREE.MeshStandardMaterial({ color: 0x191b20, roughness: 0.9 });
-  for (const box of obstacles) {
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(box.w, box.h, box.d), crateMat);
+  // --- 컨셉별 장애물 ---
+  const propMat = new THREE.MeshStandardMaterial({ color: concept.propColor, roughness: 0.92 });
+  for (const box of concept.obstacles) {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(box.w, box.h, box.d), propMat);
     mesh.position.set(box.x, box.h / 2, box.z);
+    mesh.rotation.y = box.rot || 0;
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     scene.add(mesh);
     view.colliders.push({ x: box.x, z: box.z, r: Math.max(box.w, box.d) / 2 + 0.35 });
   }
 
-  // 발전기 3대 (서버 스냅샷 좌표 사용)
-  for (const gen of snapshot.generators) {
-    createGenerator(scene, gen);
+  // --- 컨셉별 소품 ---
+  addConceptProps(scene, concept);
+
+  // 발전기/게이트 (서버 스냅샷 좌표)
+  for (const gen of snapshot.generators) createGenerator(scene, gen);
+  for (const gate of snapshot.gates) createGate(scene, gate);
+}
+
+// 컨셉별 장식물(나무/기계/잔해)과 조명
+function addConceptProps(scene, concept) {
+  const propMat = new THREE.MeshStandardMaterial({ color: concept.propColor, roughness: 0.95 });
+
+  if (concept.prop === 'tree') {
+    const trunkMat = new THREE.MeshStandardMaterial({ color: 0x241a12, roughness: 1 });
+    const leafMat = new THREE.MeshStandardMaterial({ color: 0x1d3324, roughness: 1 });
+    for (let i = 0; i < concept.trees; i += 1) {
+      const a = (i / concept.trees) * Math.PI * 2 + 0.4;
+      const r = 16 + (i % 5) * 3.2;
+      const x = Math.cos(a) * r;
+      const z = Math.sin(a) * r;
+      const h = 4.5 + (i % 3) * 0.8;
+      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.26, h, 7), trunkMat);
+      trunk.position.set(x, h / 2, z);
+      trunk.castShadow = true;
+      scene.add(trunk);
+      const crown = new THREE.Mesh(new THREE.ConeGeometry(1.5, 2.6, 8), leafMat);
+      crown.position.set(x, h + 1.1, z);
+      crown.castShadow = true;
+      scene.add(crown);
+      view.colliders.push({ x, z, r: 0.5 });
+    }
+  } else if (concept.prop === 'machine') {
+    const metalMat = new THREE.MeshStandardMaterial({ color: 0x3a3430, roughness: 0.55, metalness: 0.55 });
+    for (let i = 0; i < 8; i += 1) {
+      const a = (i / 8) * Math.PI * 2;
+      const r = 20 + (i % 3) * 2.6;
+      const x = Math.cos(a) * r;
+      const z = Math.sin(a) * r;
+      const base = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.1, 1.2), metalMat);
+      base.position.set(x, 0.55, z);
+      base.castShadow = true;
+      base.receiveShadow = true;
+      scene.add(base);
+      const stack = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.28, 2.6, 8), metalMat);
+      stack.position.set(x + 0.4, 2.3, z);
+      stack.castShadow = true;
+      scene.add(stack);
+      view.colliders.push({ x, z, r: 1.0 });
+    }
+    // 컨베이어 벨트
+    for (const cx of [-18, 18]) {
+      const belt = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.5, 24), metalMat);
+      belt.position.set(cx, 1.4, 0);
+      belt.castShadow = true;
+      scene.add(belt);
+    }
+  } else {
+    // 폐허: 부서진 벽돌 더미 + 나무 널빤지
+    const rubbleMat = new THREE.MeshStandardMaterial({ color: 0x2b2e34, roughness: 1 });
+    for (let i = 0; i < 10; i += 1) {
+      const a = (i / 10) * Math.PI * 2 + 1.1;
+      const r = 18 + (i % 4) * 2.4;
+      const x = Math.cos(a) * r;
+      const z = Math.sin(a) * r;
+      const h = 0.5 + (i % 3) * 0.4;
+      const pile = new THREE.Mesh(new THREE.BoxGeometry(2.2, h, 2.0), rubbleMat);
+      pile.position.set(x, h / 2, z);
+      pile.rotation.y = a;
+      pile.castShadow = true;
+      pile.receiveShadow = true;
+      scene.add(pile);
+      view.colliders.push({ x, z, r: 1.2 });
+    }
+    const plankMat = new THREE.MeshStandardMaterial({ color: 0x3a2c1c, roughness: 1 });
+    for (let i = 0; i < 6; i += 1) {
+      const plank = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.14, 0.5), plankMat);
+      plank.position.set(-24 + i * 9, 0.1, -27);
+      plank.rotation.y = (i % 2 ? 0.3 : -0.2);
+      plank.receiveShadow = true;
+      scene.add(plank);
+    }
   }
 
-  // 탈출구 2개
-  for (const gate of snapshot.gates) {
-    createGate(scene, gate);
+  // --- 조명(컨셉별 램프) ---
+  const lampColor = concept.prop === 'forest' ? 0x9fe08a : concept.prop === 'factory' ? 0xffb35c : 0xbcd0ff;
+  for (let i = 0; i < concept.lamps; i += 1) {
+    const a = (i / Math.max(1, concept.lamps)) * Math.PI * 2;
+    const r = 13;
+    const x = Math.cos(a) * r;
+    const z = Math.sin(a) * r;
+    const pole = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.07, 0.09, 3.4, 6),
+      new THREE.MeshStandardMaterial({ color: 0x1c1e22, roughness: 0.8 })
+    );
+    pole.position.set(x, 1.7, z);
+    pole.castShadow = true;
+    scene.add(pole);
+    const bulb = new THREE.Mesh(
+      new THREE.SphereGeometry(0.16, 10, 8),
+      new THREE.MeshBasicMaterial({ color: lampColor })
+    );
+    bulb.position.set(x, 3.5, z);
+    scene.add(bulb);
+    const light = new THREE.PointLight(lampColor, 7, 14, 1.7);
+    light.position.set(x, 3.4, z);
+    scene.add(light);
   }
 }
 
@@ -1015,54 +1172,30 @@ function makeLabelSprite(text, color = '#ffffff') {
 // 원격 플레이어 메시 + 부드러운 보간
 // ===========================================================================
 function makePlayerMesh(role, nickname) {
-  const group = new THREE.Group();
   const isKiller = role === 'killer';
-  const bodyColor = isKiller ? 0x4a0d14 : 0x0e4a3a;
   const glowColor = isKiller ? '#ff2d3f' : '#22e6a2';
+  // 사실적인 인간형 리그 (rig.js)
+  const human = makeHumanoid(role, nickname);
+  const group = human.group;
 
-  const body = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.34, 0.42, isKiller ? 1.9 : 1.6, 12),
-    new THREE.MeshStandardMaterial({
-      color: bodyColor,
-      roughness: 0.8,
-      emissive: isKiller ? 0x550000 : 0x003322,
-      emissiveIntensity: 0.7,
-    })
-  );
-  body.position.y = isKiller ? 0.95 : 0.8;
-  body.castShadow = true;
-  group.add(body);
-
-  const head = new THREE.Mesh(
-    new THREE.SphereGeometry(0.24, 14, 14),
-    new THREE.MeshStandardMaterial({ color: 0xd8cfc0, roughness: 0.85 })
-  );
-  head.position.y = isKiller ? 2.05 : 1.78;
-  group.add(head);
-
-  // 살인마 눈빛 (빨간 점 2개)
-  if (isKiller) {
-    const eyeGeo = new THREE.SphereGeometry(0.045, 8, 8);
-    const eyeMat = new THREE.MeshBasicMaterial({ color: 0xff1a2b });
-    const eyeL = new THREE.Mesh(eyeGeo, eyeMat);
-    eyeL.position.set(-0.09, 2.08, 0.2);
-    const eyeR = new THREE.Mesh(eyeGeo, eyeMat);
-    eyeR.position.set(0.09, 2.08, 0.2);
-    group.add(eyeL, eyeR);
-  }
+  // 히트 판정용 박스(머리/몸통) — 리그에 맞춰 위치 갱신
+  const head = human.rig.head;
+  const body = human.rig.torso;
 
   const label = makeLabelSprite(nickname || (isKiller ? '살인마' : '생존자'), glowColor);
-  label.position.y = isKiller ? 2.6 : 2.3;
+  label.position.y = isKiller ? 2.75 : 2.45;
   group.add(label);
 
-  return { group, body, head, label };
+  return { group, body, head, label, human };
 }
 
 function spawnRemotes(snapshot) {
   for (const p of snapshot.players) {
     if (p.socketId === game.mySocketId) continue;
-    const { group, body, head } = makePlayerMesh(p.role, p.nickname || p.email);
+    const { group, body, head, human } = makePlayerMesh(p.role, p.nickname || p.email);
     group.position.set(p.position.x, 0, p.position.z);
+    group.rotation.y = p.rotation?.y || 0;
+    // 히트 판정은 그룹 좌표를 참조한다.
     body.userData.socketId = p.socketId;
     head.userData.socketId = p.socketId;
     view.scene.add(group);
@@ -1075,6 +1208,11 @@ function spawnRemotes(snapshot) {
       group,
       body,
       head,
+      human,
+      speed: 0,
+      attackT: 0,
+      execT: 0,
+      lastPos: new THREE.Vector3(p.position.x, 0, p.position.z),
       targetPos: new THREE.Vector3(p.position.x, 0, p.position.z),
       targetYaw: p.rotation?.y || 0,
     });
@@ -1086,14 +1224,41 @@ function lerpAngle(current, target, t) {
   return current + delta * t;
 }
 
-function updateRemotes(dt) {
+function updateRemotes(dt, time) {
   // 뚝뚝 끊기지 않도록 매 프레임 lerp 로 위치/회전 동기화.
   const factor = 1 - Math.exp(-12 * dt);
   for (const remote of view.remotes.values()) {
     const pos = remote.group.position;
+    const prevX = pos.x, prevZ = pos.z;
     pos.x = THREE.MathUtils.lerp(pos.x, remote.targetPos.x, factor);
     pos.z = THREE.MathUtils.lerp(pos.z, remote.targetPos.z, factor);
     remote.group.rotation.y = lerpAngle(remote.group.rotation.y, remote.targetYaw, factor);
+
+    // 이동 속도 추정(애니메이션용)
+    const moved = Math.hypot(pos.x - prevX, pos.z - prevZ);
+    const inst = dt > 0 ? moved / dt : 0;
+    remote.speed = remote.speed + (inst - remote.speed) * Math.min(1, dt * 8);
+
+    if (!remote.human) continue;
+    const health = remote.health || 'healthy';
+    const dead = health === 'dead';
+    const down = health === 'dying';
+    if (remote.attackT > 0) remote.attackT = Math.max(0, remote.attackT - dt);
+    if (remote.execT > 0) remote.execT = Math.max(0, remote.execT - dt);
+
+    if (remote.execT > 0) {
+      // 처형(내치기) 연출
+      animateExecution(remote.human, dt, time, 1 - remote.execT / 1.1);
+    } else {
+      animateHumanoid(remote.human, dt, time, {
+        speed: remote.speed,
+        running: remote.speed > 4.6,
+        health,
+        dead,
+        down,
+        attackT: remote.attackT,
+      });
+    }
   }
 }
 
@@ -1129,13 +1294,16 @@ function tick() {
   if (!game.active) return;
   view.rafId = requestAnimationFrame(tick);
   const dt = Math.min(view.clock.getDelta(), 0.05);
+  const time = performance.now() / 1000;
 
   updateMovement(dt);
   updateRepair(dt);
   updateCooldownUI();
   updateSkillUI();
   updateEffectUI();
-  updateRemotes(dt);
+  updateHealthBar();
+  updateStaminaUI();
+  updateRemotes(dt, time);
   updateGeneratorFx();
   maybeAutoEscape();
 
@@ -1146,50 +1314,67 @@ function updateMovement(dt) {
   const keys = view.keys;
   let forwardInput = 0;
   let rightInput = 0;
-  // 기절 상태에서는 이동 불가.
-  if (game.stunnedUntil > Date.now()) {
-    forwardInput = 0;
-    rightInput = 0;
-  }
+  const stunned = game.stunnedUntil > Date.now();
+  if (stunned) { forwardInput = 0; rightInput = 0; }
   if (keys.has('KeyW') || keys.has('ArrowUp')) forwardInput += 1;
   if (keys.has('KeyS') || keys.has('ArrowDown')) forwardInput -= 1;
   if (keys.has('KeyD') || keys.has('ArrowRight')) rightInput += 1;
   if (keys.has('KeyA') || keys.has('ArrowLeft')) rightInput -= 1;
 
-  if (forwardInput !== 0 || rightInput !== 0) {
-    const camera = view.camera;
-    const forward = new THREE.Vector3();
-    camera.getWorldDirection(forward);
-    forward.y = 0;
-    forward.normalize();
-    const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
+  // --- 달리기 (Shift) : 스태미나 소모 ---
+  const wantRun = !stunned && (keys.has('ShiftLeft') || keys.has('ShiftRight')) && view.stamina > 1;
+  view.sprinting = wantRun && (forwardInput !== 0 || rightInput !== 0);
+  if (view.sprinting) view.stamina = Math.max(0, view.stamina - view.staminaDrain * dt);
+  else view.stamina = Math.min(view.staminaMax, view.stamina + view.staminaRegen * dt);
 
-    const move = new THREE.Vector3()
-      .addScaledVector(forward, forwardInput)
-      .addScaledVector(right, rightInput);
-    if (move.lengthSq() > 1) move.normalize();
-    const speedMul = view.chaseUntil > Date.now() ? 2 : 1;
-    move.multiplyScalar(view.baseSpeed * speedMul * dt);
-    view.playerPos.add(move);
+  // --- 목표 속도 계산 ---
+  const camera = view.camera;
+  const forward = new THREE.Vector3();
+  camera.getWorldDirection(forward);
+  forward.y = 0;
+  forward.normalize();
+  const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
 
-    // 맵 경계 + 장애물 충돌 해소.
-    view.playerPos.x = THREE.MathUtils.clamp(view.playerPos.x, -29, 29);
-    view.playerPos.z = THREE.MathUtils.clamp(view.playerPos.z, -29, 29);
-    for (const collider of view.colliders) {
-      const dx = view.playerPos.x - collider.x;
-      const dz = view.playerPos.z - collider.z;
-      const dist = Math.hypot(dx, dz);
-      if (dist < collider.r && dist > 0.0001) {
-        const push = (collider.r - dist) / dist;
-        view.playerPos.x += dx * push;
-        view.playerPos.z += dz * push;
-      }
+  const dir = new THREE.Vector3()
+    .addScaledVector(forward, forwardInput)
+    .addScaledVector(right, rightInput);
+  const hasInput = dir.lengthSq() > 0;
+  if (hasInput) dir.normalize();
+
+  const chaseMul = view.chaseUntil > Date.now() ? 2 : 1;
+  const target = hasInput
+    ? (view.sprinting ? view.runSpeed : view.walkSpeed) * chaseMul
+    : 0;
+  view.baseSpeed = target;
+
+  // --- 가속/감속 (유동적인 이동) ---
+  const accel = hasInput ? 14 : 11;
+  const desired = dir.multiplyScalar(target);
+  view.velocity.x = THREE.MathUtils.damp(view.velocity.x, desired.x, accel, dt);
+  view.velocity.z = THREE.MathUtils.damp(view.velocity.z, desired.z, accel, dt);
+  view.playerPos.addScaledVector(view.velocity, dt);
+
+  // 맵 경계 + 장애물 충돌 해소.
+  view.playerPos.x = THREE.MathUtils.clamp(view.playerPos.x, -29, 29);
+  view.playerPos.z = THREE.MathUtils.clamp(view.playerPos.z, -29, 29);
+  for (const collider of view.colliders) {
+    const dx = view.playerPos.x - collider.x;
+    const dz = view.playerPos.z - collider.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist < collider.r && dist > 0.0001) {
+      const push = (collider.r - dist) / dist;
+      view.playerPos.x += dx * push;
+      view.playerPos.z += dz * push;
     }
   }
 
+  // --- 헤드밥(걸음 흔들림) ---
+  const speed = Math.hypot(view.velocity.x, view.velocity.z);
+  view.bobAmount = THREE.MathUtils.damp(view.bobAmount, Math.min(1, speed / view.runSpeed), 8, dt);
+  view.bobPhase += dt * (view.sprinting ? 11 : 7) * Math.min(1, speed / 3.2);
   view.playerPos.y = view.eyeHeight;
 
-  // 화면 흔들림(Screen Shake): 위치 지터를 더하되 원본 좌표는 보존.
+  // 화면 흔들림(Screen Shake) + 걸음 흔들림(Head Bob)
   let jitter = null;
   if (Date.now() < view.shakeUntil) {
     const amp = view.shakeAmp;
@@ -1200,7 +1385,14 @@ function updateMovement(dt) {
     );
     view.camera.position.copy(view.playerPos).add(jitter);
   } else {
-    view.camera.position.copy(view.playerPos);
+    const bob = view.bobAmount;
+    const bobX = Math.sin(view.bobPhase) * 0.035 * bob;
+    const bobY = Math.abs(Math.cos(view.bobPhase)) * 0.05 * bob;
+    view.camera.position.set(
+      view.playerPos.x + bobX,
+      view.playerPos.y + bobY - 0.02 * bob,
+      view.playerPos.z
+    );
   }
 
   // 위치 송신 스로틀링: 정확히 50ms 간격으로 제한.
@@ -1208,6 +1400,7 @@ function updateMovement(dt) {
   if (view.moveAccum >= 0.05) {
     view.moveAccum = 0;
     net.socket?.emit('move', {
+      sprint: view.sprinting,
       position: { x: view.playerPos.x, y: view.playerPos.y, z: view.playerPos.z },
       rotation: {
         x: view.camera.rotation.x,
@@ -1359,6 +1552,10 @@ function renderGeneratorList() {
 }
 
 function updateObjective() {
+  if (game.mapName && els.mapTag) {
+    els.mapTag.textContent = `🗺 ${game.mapName}`;
+    els.mapTag.classList.remove('hidden');
+  }
   if (game.gatesOpen) {
     els.objective.textContent = game.role === 'killer'
       ? '탈출을 저지하라!'
@@ -1396,6 +1593,13 @@ function tryAttack() {
   shakeScreen(0.3, 320);
   els.hitmarker.classList.remove('hidden');
   setTimeout(() => els.hitmarker.classList.add('hidden'), 220);
+  // 살인마 공격 모션 + 대상 처형 연출 시작
+  const target = view.remotes.get(targetId);
+  if (target) {
+    target.attackT = 0.22;
+    target.execT = 1.1;
+  }
+  game.execT = 0.9;
   net.socket?.emit('attack_hit', { targetId });
 }
 
@@ -1423,6 +1627,17 @@ function onAttackMissed(data) {
 }
 
 function onPlayerDamaged(data) {
+  // 원격 플레이어 체력 상태 반영 → 애니메이션(절뚝임/기어긋기/쓰러짐)
+  if (data?.targetId) {
+    const remote = view.remotes.get(data.targetId);
+    if (remote) {
+      remote.health = data.health || remote.health;
+      if (data.health === 'dying') {
+        remote.execT = 0;
+        remote.downT = 0;
+      }
+    }
+  }
   const target = view.remotes.get(data.targetId);
   if (target) {
     target.health = data.health;
@@ -1431,8 +1646,14 @@ function onPlayerDamaged(data) {
   if (data.targetId === game.mySocketId) {
     game.myHealth = data.health;
     updateHealthUI();
+    updateHealthBar();
     flash(els.damageFlash, 280);
     shakeScreen(0.35, 380);
+    // 처형 연출 오버레이
+    if (els.execOverlay) {
+      els.execOverlay.classList.remove('hidden');
+      setTimeout(() => els.execOverlay.classList.add('hidden'), 520);
+    }
     toast(`살인마에게 공격당했다! (상태: ${HEALTH_LABEL[data.health]})`);
   }
   if (data.attackerId === game.mySocketId) {
@@ -1444,7 +1665,11 @@ function onPlayerDamaged(data) {
 
 function onPlayerDied(data) {
   const target = view.remotes.get(data.socketId);
-  if (target) markRemoteDead(target);
+  if (target) {
+    target.health = 'dead';
+    target.execT = 0;
+    markRemoteDead(target);
+  }
   if (data.socketId === game.mySocketId) {
     game.myHealth = 'dead';
     updateHealthUI();
@@ -1455,6 +1680,7 @@ function onPlayerDied(data) {
 }
 
 function markRemoteDead(remote) {
+  remote.health = 'dead';
   remote.health = 'dead';
   remote.body.material.color.set(0x0a0a0a);
   remote.body.material.emissive.set(0x000000);

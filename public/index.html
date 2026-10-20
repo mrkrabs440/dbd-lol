@@ -159,6 +159,9 @@
         <!-- 목표 안내 -->
         <div id="hud-objective" class="hud-objective">발전기 수리: 0 / 3</div>
 
+        <!-- 맵 컨셉 표시 -->
+        <div id="map-tag" class="map-tag hidden">🗺 폐허 학교</div>
+
         <!-- 발전기 상태 목록 -->
         <ul id="hud-generators" class="hud-generators"></ul>
 
@@ -191,7 +194,18 @@
         <div id="health-wrap" class="health-wrap hidden">
           <span class="health-label">상태</span>
           <span id="health-pips" class="health-pips"></span>
+          <div id="health-bar" class="health-bar" data-state="healthy">
+            <div id="health-fill" class="health-fill"></div>
+          </div>
         </div>
+
+        <!-- 스태미나(달리기) -->
+        <div id="stamina-wrap" class="stamina-wrap hidden">
+          <div class="stamina-bar"><div id="stamina-fill" class="stamina-fill"></div></div>
+        </div>
+
+        <!-- 처형 연출 오버레이 -->
+        <div id="exec-overlay" class="exec-overlay hidden"><span>처형</span></div>
 
         <!-- 살인마 스킬바 -->
         <div id="skill-wrap" class="skill-wrap hidden">
