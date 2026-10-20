@@ -82,7 +82,20 @@ app.use(
 const distDir = path.join(__dirname, '..', 'dist');
 const publicDir = path.join(__dirname, '..', 'public');
 const staticDir = fs.existsSync(path.join(distDir, 'index.html')) ? distDir : publicDir;
-app.use(express.static(staticDir, { maxAge: NODE_ENV === 'production' ? '1h' : 0 }));
+// 정적 파일은 항상 재검증한다.
+// (maxAge 로 캐시하면 구버전 client.js/index.html 이 남아 새 기능이 동작하지 않는 문제가 생긴다)
+app.use(
+  express.static(staticDir, {
+    maxAge: 0,
+    etag: true,
+    lastModified: true,
+    setHeaders(res, filePath) {
+      if (/\.(html|js|css)$/i.test(filePath)) {
+        res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+      }
+    },
+  })
+);
 
 // ---------------------------------------------------------------------------
 // 상태 점검 엔드포인트
