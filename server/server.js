@@ -188,6 +188,16 @@ io.on('connection', (socket) => {
     socket.emit('queue:left', { left, ...roomManager.getQueueSnapshot(socket.id) });
   });
 
+  // --- 싱글 테스트 모드 (혼자서 즉시 매치) --------------------------------------
+  socket.on('test:start', (data) => {
+    const role = data?.role === 'survivor' ? 'survivor' : 'killer';
+    roomManager.createTestMatch(socket, role);
+  });
+  socket.on('queue:join_test', (data) => {
+    const role = data?.role === 'survivor' ? 'survivor' : 'killer';
+    roomManager.createTestMatch(socket, role);
+  });
+
   // --- 인게임 패킷 라우팅 ------------------------------------------------------
   // 요구 명세 이벤트명: move / repair_progress / attack_hit
   socket.on('move', (data) => roomManager.handleMove(socket, data));
@@ -197,6 +207,10 @@ io.on('connection', (socket) => {
   socket.on('repair:stop', (data) => roomManager.handleRepairStop(socket, data));
 
   socket.on('attack_hit', (data) => roomManager.handleAttack(socket, data));
+
+  // --- 살인마 스킬 --------------------------------------------------------------
+  socket.on('killer_skill', (data) => roomManager.handleKillerSkill(socket, data));
+  socket.on('skill:use', (data) => roomManager.handleKillerSkill(socket, data));
 
   // 탈출 요청(모든 발전기 완료 후 게이트 근처에서 전송).
   socket.on('player:escape', () => roomManager.handleEscape(socket));

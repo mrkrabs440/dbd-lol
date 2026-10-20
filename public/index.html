@@ -113,6 +113,11 @@
               <button id="btn-find-match" class="btn primary big" type="button">매치 찾기 (4인)</button>
               <button id="btn-cancel-match" class="btn ghost hidden" type="button">매칭 취소</button>
             </div>
+            <div class="row test-row">
+              <button id="btn-test-killer" class="btn danger" type="button">🩸 테스트 (살인마)</button>
+              <button id="btn-test-survivor" class="btn ghost" type="button">🔦 테스트 (생존자)</button>
+            </div>
+            <p class="match-desc small">싱글 테스트: 혼자서 바로 시작. 나머지 인원은 봇이 대신합니다.</p>
             <div id="queue-panel" class="queue-panel hidden">
               <div class="spinner"></div>
               <p id="queue-status">대기열에 진입하는 중...</p>
@@ -187,6 +192,18 @@
           <span class="health-label">상태</span>
           <span id="health-pips" class="health-pips"></span>
         </div>
+
+        <!-- 살인마 스킬바 -->
+        <div id="skill-wrap" class="skill-wrap hidden">
+          <div id="skill-bar" class="skill-bar"></div>
+        </div>
+
+        <!-- 상태 효과 표시 -->
+        <div id="chase-tag" class="state-tag chase hidden">🔥 미궁 (2배속)</div>
+        <div id="stun-tag" class="state-tag stun hidden">💫 기절</div>
+
+        <!-- 암전 오버레이 -->
+        <div id="blind-overlay" class="blind-overlay hidden"></div>
 
         <!-- 킬피드 / 토스트 -->
         <ul id="killfeed" class="killfeed"></ul>

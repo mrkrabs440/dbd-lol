@@ -71,6 +71,58 @@ const EXIT_GATE_POSITIONS = [
 ];
 const ESCAPE_RADIUS = 3;
 
+// --- 살인마 스킬 ---
+// 살인마만 사용 가능. 서버가 쿨다운·사거리·효과를 모두 검증한다.
+const KILLER_SKILLS = Object.freeze({
+  chase: Object.freeze({
+    id: 'chase',
+    name: '미궁',
+    key: 'Q',
+    cooldownMs: 20000,
+    durationMs: 2500,
+    range: 0,
+    speedMultiplier: 2.0,
+    desc: '2.5초간 2배속 돌진',
+  }),
+  terror: Object.freeze({
+    id: 'terror',
+    name: '공포',
+    key: 'F',
+    cooldownMs: 30000,
+    durationMs: 1500,
+    range: 18,
+    speedMultiplier: 1,
+    desc: '18m 내 생존자 기절',
+  }),
+  dark: Object.freeze({
+    id: 'dark',
+    name: '암전',
+    key: 'E',
+    cooldownMs: 35000,
+    durationMs: 4000,
+    range: 12,
+    speedMultiplier: 1,
+    desc: '12m 내 생존자 시야 차단',
+  }),
+});
+const KILLER_SKILL_LIST = Object.freeze(Object.values(KILLER_SKILLS));
+// 기절/암전 지속 시간(밀리초)
+const STUN_DURATION_MS = 1500;
+const BLIND_DURATION_MS = 4000;
+// 미궁(돌진) 중 허용 이동속도 배수
+const CHASE_SPEED_MULTIPLIER = 2.0;
+
+// --- 싱글 테스트 모드 ---
+// 혼자서 즉시 매치를 시작한다. 나머지 인원은 서버 봇이 대신한다.
+const TEST_MODE_ROLES = Object.freeze({
+  KILLER: 'killer',
+  SURVIVOR: 'survivor',
+});
+const TEST_BOT_SPEED = 3.0;
+const TEST_BOT_TICK_MS = 400;
+const TEST_SURVIVOR_NAMES = Object.freeze(['BOT_훈련병', 'BOT_복사본', 'BOT_신병']);
+const TEST_KILLER_NAME = 'BOT_살인마';
+
 // --- 승패 판정 ---
 // 모든 생존자가 (탈출 또는 사망) 으로 정리되면 매치 종료.
 // 탈출자가 1명 이상이면 생존자 승, 아니면 살인마 승.
@@ -96,4 +148,14 @@ module.exports = {
   GENERATOR_POSITIONS,
   EXIT_GATE_POSITIONS,
   ESCAPE_RADIUS,
+  KILLER_SKILLS,
+  KILLER_SKILL_LIST,
+  STUN_DURATION_MS,
+  BLIND_DURATION_MS,
+  CHASE_SPEED_MULTIPLIER,
+  TEST_MODE_ROLES,
+  TEST_BOT_SPEED,
+  TEST_BOT_TICK_MS,
+  TEST_SURVIVOR_NAMES,
+  TEST_KILLER_NAME,
 };

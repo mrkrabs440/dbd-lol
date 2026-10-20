@@ -50,6 +50,11 @@ const els = {
   repairFill: $('repair-fill'),
   repairText: $('repair-text'),
   cooldownWrap: $('cooldown-wrap'),
+  skillWrap: $('skill-wrap'),
+  skillBar: $('skill-bar'),
+  blindOverlay: $('blind-overlay'),
+  testKillerBtn: $('btn-test-killer'),
+  testSurvivorBtn: $('btn-test-survivor'),
   cooldownFill: $('cooldown-fill'),
   cooldownText: $('cooldown-text'),
   healthWrap: $('health-wrap'),
@@ -92,6 +97,15 @@ const game = {
   gatesOpen: false,
   myHealth: 'healthy',
   escaped: false,
+  // 살인마 스킬
+  skills: [],
+  skillReadyAt: {},
+  skillActiveUntil: 0,
+  chaseUntil: 0,
+  // 상태 이상
+  stunnedUntil: 0,
+  blindedUntil: 0,
+  isTest: false,
 };
 
 // ---------------------------------------------------------------------------
@@ -117,6 +131,8 @@ const view = {
   repair: { generatorId: null, progress: 0, lastEmit: 0, active: false },
   cooldownUntil: 0,
   cooldownMs: 2500,
+  chaseUntil: 0,
+  blindUntil: 0,
   shakeUntil: 0,
   shakeAmp: 0,
   escapeEmitAt: 0,
@@ -329,6 +345,20 @@ els.btnRefreshProfile.addEventListener('click', refreshProfile);
 // ===========================================================================
 // Socket.io 연결 및 매치메이킹
 // ===========================================================================
+// ---------------------------------------------------------------------------
+// 싱글 테스트 모드
+// ---------------------------------------------------------------------------
+function startTestMode(role) {
+  if (!net.socket || !net.socket.connected) {
+    lobbyMessage('서버에 연결 중입니다. 잠시 후 다시 시도해주세요.');
+    return;
+  }
+  net.inQueue = false;
+  updateQueueUI(null);
+  lobbyMessage(`테스트 모드 시작 (${role === 'killer' ? '살인마' : '생존자'})...`);
+  net.socket.emit('test:start', { role });
+}
+
 function connectSocket() {
   if (!session.token) {
     lobbyMessage('로그인이 필요합니다.');
@@ -405,6 +435,9 @@ function connectSocket() {
   socket.on('generator:completed', onGeneratorCompleted);
   socket.on('gates:opened', onGatesOpened);
   socket.on('attack:result', onAttackResult);
+  socket.on('killer:skill', onKillerSkill);
+  socket.on('skill:result', onSkillResult);
+  socket.on('player:effect', onPlayerEffect);
   socket.on('attack:missed', onAttackMissed);
   socket.on('player:damaged', onPlayerDamaged);
   socket.on('player:died', onPlayerDied);
@@ -437,6 +470,16 @@ els.btnFindMatch.addEventListener('click', () => {
 
 els.btnCancelMatch.addEventListener('click', () => {
   net.socket?.emit('queue:leave');
+});
+
+// 싱글 테스트 모드 버튼.
+els.testKillerBtn?.addEventListener('click', () => {
+  if (!net.socket) connectSocket();
+  startTestMode('killer');
+});
+els.testSurvivorBtn?.addEventListener('click', () => {
+  if (!net.socket) connectSocket();
+  startTestMode('survivor');
 });
 
 els.btnBackLobby.addEventListener('click', async () => {
@@ -474,11 +517,130 @@ function startMatch(snapshot) {
   els.repairWrap.classList.toggle('hidden', isKiller);
   els.cooldownWrap.classList.toggle('hidden', !isKiller);
   els.healthWrap.classList.toggle('hidden', isKiller);
+  // 살인마 스킬 UI
+  game.skills = snapshot.rules?.skills || [];
+  game.skillReadyAt = {};
+  game.skillActiveUntil = 0;
+  game.chaseUntil = 0;
+  game.stunnedUntil = 0;
+  game.blindedUntil = 0;
+  view.chaseUntil = 0;
+  view.blindUntil = 0;
+  game.isTest = !!snapshot.isTest;
+  if (els.skillWrap) els.skillWrap.classList.toggle('hidden', !isKiller);
+  if (isKiller) buildSkillBar();
   updateObjective();
   updateHealthUI();
 
   initGame(snapshot);
   toast(isKiller ? '당신은 살인마입니다.' : '당신은 생존자입니다.');
+}
+
+// ---------------------------------------------------------------------------
+// 살인마 스킬
+// ---------------------------------------------------------------------------
+function buildSkillBar() {
+  if (!els.skillBar) return;
+  els.skillBar.innerHTML = '';
+  for (const skill of game.skills || []) {
+    const item = document.createElement('div');
+    item.className = 'skill-item';
+    item.dataset.skill = skill.id;
+    item.innerHTML =
+      `<span class="skill-key">${skill.key}</span>` +
+      `<span class="skill-name">${skill.name}</span>` +
+      `<span class="skill-desc">${skill.desc}</span>` +
+      `<div class="skill-bar"><div class="skill-fill"></div></div>` +
+      `<span class="skill-cd">준비</span>`;
+    els.skillBar.appendChild(item);
+  }
+}
+
+function updateSkillUI() {
+  if (!els.skillBar) return;
+  const now = Date.now();
+  for (const item of els.skillBar.querySelectorAll('.skill-item')) {
+    const skillId = item.dataset.skill;
+    const skill = (game.skills || []).find((x) => x.id === skillId);
+    if (!skill) continue;
+    const readyAt = game.skillReadyAt[skillId] || 0;
+    const remaining = Math.max(0, readyAt - now);
+    const total = skill.cooldownMs || 1;
+    const fill = item.querySelector('.skill-fill');
+    const cd = item.querySelector('.skill-cd');
+    if (fill) fill.style.width = `${Math.round((1 - remaining / total) * 100)}%`;
+    if (cd) cd.textContent = remaining > 0 ? `${(remaining / 1000).toFixed(1)}초` : '준비';
+    item.classList.toggle('cooling', remaining > 0);
+  }
+}
+
+function useSkill(skillId) {
+  if (!game.active || game.role !== 'killer') return;
+  const skill = (game.skills || []).find((x) => x.id === skillId);
+  if (!skill) return;
+  const readyAt = game.skillReadyAt[skillId] || 0;
+  if (readyAt > Date.now()) {
+    toast(`${skill.name} 쿨타임 중`);
+    return;
+  }
+  net.socket?.emit('killer_skill', { skill: skillId });
+}
+
+function onKillerSkill(data) {
+  if (!data) return;
+  if (data.by === game.mySocketId) {
+    // 내가 쓴 스킬
+    if (data.skill === 'chase') {
+      game.chaseUntil = Date.now() + (data.durationMs || 2500);
+      view.chaseUntil = game.chaseUntil;
+      toast('미궁! 2.5초간 2배속');
+      shakeScreen(0.25, 220);
+    } else if (data.skill === 'terror') {
+      toast(`공포! ${data.affected?.length || 0}명 기절`);
+    } else if (data.skill === 'dark') {
+      toast(`암전! ${data.affected?.length || 0}명 시야 차단`);
+    }
+  } else {
+    // 상대 살인마가 쓴 스킬
+    if (data.skill === 'terror' || data.skill === 'dark') {
+      toast(`살인마가 ${data.name}을(를) 사용했다!`);
+    }
+  }
+}
+
+function onSkillResult(data) {
+  if (!data) return;
+  if (data.ok === false && data.reason === 'cooldown' && data.retryAfterMs) {
+    const skill = (game.skills || []).find((x) => x.id === data.skill);
+    if (skill) game.skillReadyAt[skill.id] = Date.now() + data.retryAfterMs;
+  }
+}
+
+function onPlayerEffect(data) {
+  if (!data) return;
+  if (data.socketId !== game.mySocketId) return;
+  if (data.effect === 'stun') {
+    game.stunnedUntil = data.until || Date.now() + 1500;
+    toast('기절! 움직일 수 없다');
+    shakeScreen(0.5, 420);
+  } else if (data.effect === 'blind') {
+    game.blindedUntil = data.until || Date.now() + 4000;
+    view.blindUntil = game.blindedUntil;
+    toast('암전! 시야가 막혔다');
+  }
+}
+
+function updateEffectUI() {
+  const now = Date.now();
+  // 암전 오버레이
+  const blinded = game.blindedUntil > now;
+  if (els.blindOverlay) els.blindOverlay.classList.toggle('hidden', !blinded);
+  // 기절 표시
+  if (els.stunTag) els.stunTag.classList.toggle('hidden', game.stunnedUntil <= now);
+  // 미궁 배속
+  const chasing = game.chaseUntil > now;
+  if (view.chaseUntil !== game.chaseUntil) view.chaseUntil = game.chaseUntil;
+  if (els.chaseTag) els.chaseTag.classList.toggle('hidden', !chasing);
 }
 
 function onMatchEnd(data) {
@@ -904,6 +1066,11 @@ function onKeyDown(e) {
   if (!game.active) return;
   view.keys.add(e.code);
   if (['ArrowUp', 'ArrowDown', 'Space'].includes(e.code)) e.preventDefault();
+  if (game.role === 'killer' && !e.repeat) {
+    if (e.code === 'KeyQ') useSkill('chase');
+    if (e.code === 'KeyF') useSkill('terror');
+    if (e.code === 'KeyE') useSkill('dark');
+  }
 }
 
 function onKeyUp(e) {
@@ -928,6 +1095,8 @@ function tick() {
   updateMovement(dt);
   updateRepair(dt);
   updateCooldownUI();
+  updateSkillUI();
+  updateEffectUI();
   updateRemotes(dt);
   updateGeneratorFx();
   maybeAutoEscape();
@@ -939,6 +1108,11 @@ function updateMovement(dt) {
   const keys = view.keys;
   let forwardInput = 0;
   let rightInput = 0;
+  // 기절 상태에서는 이동 불가.
+  if (game.stunnedUntil > Date.now()) {
+    forwardInput = 0;
+    rightInput = 0;
+  }
   if (keys.has('KeyW') || keys.has('ArrowUp')) forwardInput += 1;
   if (keys.has('KeyS') || keys.has('ArrowDown')) forwardInput -= 1;
   if (keys.has('KeyD') || keys.has('ArrowRight')) rightInput += 1;
@@ -956,7 +1130,8 @@ function updateMovement(dt) {
       .addScaledVector(forward, forwardInput)
       .addScaledVector(right, rightInput);
     if (move.lengthSq() > 1) move.normalize();
-    move.multiplyScalar(view.baseSpeed * dt);
+    const speedMul = view.chaseUntil > Date.now() ? 2 : 1;
+    move.multiplyScalar(view.baseSpeed * speedMul * dt);
     view.playerPos.add(move);
 
     // 맵 경계 + 장애물 충돌 해소.

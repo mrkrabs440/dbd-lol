@@ -771,3 +771,85 @@ body {
     grid-template-columns: repeat(2, 1fr);
   }
 }
+
+/* ===========================================================================
+   살인마 스킬바 / 상태효과 / 테스트 모드
+   =========================================================================== */
+.skill-wrap {
+  position: absolute;
+  left: 18px;
+  bottom: 18px;
+  pointer-events: none;
+}
+.skill-bar { display: flex; flex-direction: column; gap: 8px; }
+.skill-item {
+  position: relative;
+  min-width: 190px;
+  padding: 8px 12px 10px;
+  border-radius: 10px;
+  background: rgba(12, 14, 20, 0.78);
+  border: 1px solid rgba(255, 90, 90, 0.35);
+  color: #e8ecf4;
+  display: grid;
+  grid-template-columns: 28px 1fr auto;
+  grid-template-areas: "key name cd" "desc desc desc" "bar bar bar";
+  gap: 2px 8px;
+  align-items: center;
+}
+.skill-item.cooling { opacity: 0.55; border-color: rgba(140, 150, 170, 0.3); }
+.skill-key {
+  grid-area: key;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: #ff3b3b;
+  color: #fff;
+  font-weight: 800;
+  font-size: 13px;
+}
+.skill-name { grid-area: name; font-weight: 700; font-size: 14px; }
+.skill-desc { grid-area: desc; font-size: 11px; color: #93a1b3; }
+.skill-cd { grid-area: cd; font-size: 11px; color: #ffb3b3; font-variant-numeric: tabular-nums; }
+.skill-bar-track { grid-area: bar; }
+.skill-bar {
+  grid-area: bar;
+  height: 4px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+.skill-fill { height: 100%; width: 100%; background: linear-gradient(90deg, #ff3b3b, #ffb03b); transition: width 0.1s linear; }
+
+.state-tag {
+  position: absolute;
+  top: 76px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 5px 14px;
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  pointer-events: none;
+}
+.state-tag.chase { background: rgba(80, 20, 10, 0.85); border: 1px solid #ff7a3b; color: #ffb37a; }
+.state-tag.stun { background: rgba(30, 30, 60, 0.85); border: 1px solid #8f9bff; color: #c3caff; }
+
+.blind-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(0, 0, 0, 0.97) 0%, rgba(0, 0, 0, 0.99) 42%, #000 100%);
+  animation: blind-pulse 1.6s ease-in-out infinite;
+}
+@keyframes blind-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.88; }
+}
+
+.test-row { margin-top: 10px; gap: 8px; }
+.match-desc.small { font-size: 12px; opacity: 0.75; margin: 6px 0 0; }
