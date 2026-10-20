@@ -9,6 +9,7 @@
 // ===========================================================================
 
 const jwt = require('jsonwebtoken');
+const crypto = require('node:crypto');
 
 // 환경 변수에서 시크릿/만료/발급자를 읽습니다.
 const JWT_SECRET =
@@ -78,8 +79,24 @@ function extractBearerToken(raw) {
   return parts.length === 1 ? parts[0] : null;
 }
 
+/**
+ * 게스트(테스트 모드)용 임시 토큰 발급.
+ * DB 계정 없이도 싱글 테스트 모드에 진입할 수 있게 한다.
+ * guest:true 플래그가 있으면 소켓 인증에서 DB 조회를 건너뛴다.
+ */
+function signGuestToken(nickname) {
+  const payload = {
+    sub: `guest_${crypto.randomUUID()}`,
+    email: null,
+    nickname: nickname || '게스트',
+    guest: true,
+  };
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: '2h', issuer: JWT_ISSUER });
+}
+
 module.exports = {
   signToken,
+  signGuestToken,
   verifyToken,
   extractBearerToken,
   JWT_SECRET,

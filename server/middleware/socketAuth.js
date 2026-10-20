@@ -55,6 +55,18 @@ function socketAuthMiddleware(req, next) {
         return next(err);
       }
 
+      // 게스트(테스트 모드) 토큰은 DB 조회를 건너뛴다.
+      if (decoded.guest) {
+        req.user = {
+          id: decoded.sub,
+          email: null,
+          nickname: decoded.nickname || '게스트',
+          isGuest: true,
+        };
+        req.userId = decoded.sub;
+        return next();
+      }
+
       // DB 에서 최신 사용자 확인
       const user = await User.findById(decoded.sub);
       if (!user) {

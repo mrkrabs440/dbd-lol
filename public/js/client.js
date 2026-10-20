@@ -84,6 +84,7 @@ const session = {
 };
 
 const net = {
+  pendingTestRole: null,
   socket: null,
   socketId: null,
   inQueue: false,
@@ -348,13 +349,44 @@ els.btnRefreshProfile.addEventListener('click', refreshProfile);
 // ---------------------------------------------------------------------------
 // 싱글 테스트 모드
 // ---------------------------------------------------------------------------
-function startTestMode(role) {
-  if (!net.socket || !net.socket.connected) {
-    lobbyMessage('서버에 연결 중입니다. 잠시 후 다시 시도해주세요.');
-    return;
-  }
+async function startTestMode(role) {
+  net.pendingTestRole = role;
   net.inQueue = false;
   updateQueueUI(null);
+  lobbyMessage('테스트 모드 준비 중...');
+
+  // 로그인 상태가 아니거나 소켓이 없으면 게스트 토큰을 발급받아 진행한다.
+  if (!session.token || !net.socket || !net.socket.connected) {
+    try {
+      const g = await api('/api/guest', { method: 'POST', body: { nickname: '테스트' } });
+      session.token = g.token;
+      session.user = g.user;
+      localStorage.setItem(TOKEN_KEY, g.token);
+      localStorage.setItem(USER_KEY, JSON.stringify(g.user));
+      if (els.userChip) {
+        els.userChip.textContent = g.user.nickname || '게스트';
+        els.userChip.classList.remove('hidden');
+      }
+    } catch (err) {
+      lobbyMessage(`테스트 모드를 시작할 수 없습니다: ${err.message}`);
+      return;
+    }
+  }
+
+  // 소켓이 없거나 끊겼으면 새로 연결한다.
+  if (!net.socket || !net.socket.connected) {
+    connectSocket();
+    // 연결 완료 후 test:start 전송
+    const waitStart = setInterval(() => {
+      if (net.socket && net.socket.connected) {
+        clearInterval(waitStart);
+        net.socket.emit('test:start', { role: net.pendingTestRole });
+      }
+    }, 200);
+    setTimeout(() => clearInterval(waitStart), 10000);
+    return;
+  }
+
   lobbyMessage(`테스트 모드 시작 (${role === 'killer' ? '살인마' : '생존자'})...`);
   net.socket.emit('test:start', { role });
 }
@@ -384,6 +416,12 @@ function connectSocket() {
   socket.on('connect', () => {
     setConn(true, '서버 연결됨');
     lobbyMessage('');
+    // 소켓 재연결 시 대기 중이던 테스트 모드 요청을 이어서 처리한다.
+    if (net.pendingTestRole) {
+      const role = net.pendingTestRole;
+      net.pendingTestRole = null;
+      setTimeout(() => socket.emit('test:start', { role }), 100);
+    }
   });
 
   socket.on('connect_error', (err) => {

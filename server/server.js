@@ -23,6 +23,7 @@ const { Server } = require('socket.io');
 const { connectDB, getDBStatus } = require('./config/db');
 const authRouter = require('./routes/authRouter');
 const { socketAuthMiddleware } = require('./middleware/socketAuth');
+const { signGuestToken } = require('./utils/token');
 const { RoomManager } = require('./game/roomManager');
 
 const NODE_ENV = process.env.NODE_ENV || 'development';
@@ -110,6 +111,17 @@ app.get('/api/status', (req, res) => {
 // REST API 라우터
 // ---------------------------------------------------------------------------
 app.use('/api/auth', authRouter);
+
+// 게스트 세션(싱글 테스트 모드용). DB 없이도 발급된다.
+app.post('/api/guest', (req, res) => {
+  const nickname = String(req.body?.nickname || '게스트').slice(0, 16);
+  const token = signGuestToken(nickname);
+  res.status(200).json({
+    success: true,
+    token,
+    user: { id: `guest_${Date.now()}`, nickname, isGuest: true },
+  });
+});
 
 // SPA 폴백: API가 아닌 모든 GET 요청은 index.html 반환.
 app.get('*', (req, res, next) => {

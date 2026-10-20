@@ -1137,6 +1137,8 @@ class RoomManager {
     await Promise.allSettled(
       players.map((p) => {
         if (!p.userId) return Promise.resolve(null);
+        // 게스트(테스트 모드)는 전적을 DB에 남기지 않는다.
+        if (String(p.userId).startsWith('guest_')) return Promise.resolve(null);
         return User.recordMatchResult(p.userId, {
           win: p.win,
           generatorsRepaired: p.role === ROLES.SURVIVOR ? p.repairsCompleted : 0,
