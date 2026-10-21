@@ -19,7 +19,7 @@ const SKIN = {
   survivor: 0xd0a888,
 };
 
-function makeHumanoid(role, nickname, palette = {}) {
+export function makeHumanoid(role, nickname, palette = {}) {
   const isKiller = role === 'killer';
   const group = new THREE.Group();
 
