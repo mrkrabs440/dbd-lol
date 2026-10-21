@@ -609,9 +609,11 @@ function startMatch(snapshot) {
   view.chaseUntil = 0;
   view.blindUntil = 0;
   game.isTest = !!snapshot.isTest;
-  game.inventory = { ...(me?.inventory || {}) };
+  // 내 플레이어 정보(스냅샷에서 직접 찾는다)
+  const meSelf = (snapshot.players || []).find((p) => p.socketId === snapshot.yourSocketId);
+  game.inventory = { ...(meSelf?.inventory || {}) };
   game.items = snapshot.rules?.items || [];
-  game.bleedOutAt = me?.bleedOutAt || 0;
+  game.bleedOutAt = meSelf?.bleedOutAt || 0;
   buildItemBar();
   if (els.skillWrap) els.skillWrap.classList.toggle('hidden', !isKiller);
   if (els.staminaWrap) els.staminaWrap.classList.toggle('hidden', isKiller);
