@@ -721,8 +721,79 @@ function onItemUsed(data) {
   } else if (data.item === 'decoy') {
     spawnDecoyMarker(data.position, data.until);
     toast('🔊 소음 유인기를 던졌다!');
+  } else if (data.item === 'trap') {
+    spawnTrapMarker(data.position, data.hit);
+    toast(data.hit ? '🪤 덫 작동! 살인마 기절' : '🪤 덫을 설치했다');
+  } else if (data.item === 'smoke') {
+    spawnSmokeCloud(data.position, data.until);
+    toast('🌫️ 연막이 피어오른다!');
+  } else if (data.item === 'emp') {
+    spawnEmpFlash();
+    toast('⚡ EMP 작동! 살인마 스킬 8초 정지');
   }
 }
+// 덫 마커
+function spawnTrapMarker(pos, hit) {
+  if (!pos || !view.scene) return;
+  const g = new THREE.Group();
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(0.9, 1.15, 18),
+    new THREE.MeshBasicMaterial({ color: hit ? 0xff4d4d : 0x66ff99, side: THREE.DoubleSide, transparent: true, opacity: 0.85 })
+  );
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.y = 0.04;
+  g.add(ring);
+  g.position.set(pos.x, 0, pos.z);
+  view.scene.add(g);
+  let t = 0;
+  const decay = () => {
+    t += 0.05;
+    ring.scale.setScalar(1 + Math.sin(t * 5) * 0.12);
+    ring.material.opacity = Math.max(0, 0.85 * (1 - t / 6));
+    if (t < 6) setTimeout(decay, 50);
+    else view.scene.remove(g);
+  };
+  decay();
+}
+// 연막 구름
+function spawnSmokeCloud(pos, until) {
+  if (!pos || !view.scene) return;
+  const g = new THREE.Group();
+  const mat = new THREE.MeshBasicMaterial({ color: 0x9aa4b0, transparent: true, opacity: 0.4, depthWrite: false });
+  for (let i = 0; i < 12; i += 1) {
+    const s = new THREE.Mesh(new THREE.SphereGeometry(1.1 + Math.random() * 0.8, 10, 8), mat);
+    s.position.set((Math.random() - 0.5) * 7, 0.6 + Math.random() * 1.6, (Math.random() - 0.5) * 7);
+    g.add(s);
+  }
+  g.position.set(pos.x, 0, pos.z);
+  view.scene.add(g);
+  const life = Math.max(1, ((until || Date.now() + 6000) - Date.now()) / 1000);
+  let t = 0;
+  const decay = () => {
+    t += 0.05;
+    mat.opacity = Math.max(0, 0.4 * Math.min(1, (life - t) / 1.5));
+    g.rotation.y += 0.01;
+    if (t < life) setTimeout(decay, 50);
+    else view.scene.remove(g);
+  };
+  decay();
+}
+// EMP 플래시
+function spawnEmpFlash() {
+  if (!view.scene) return;
+  const light = new THREE.PointLight(0x66f0ff, 60, 26, 1.2);
+  light.position.y = 2;
+  view.scene.add(light);
+  let t = 0;
+  const decay = () => {
+    t += 0.05;
+    light.intensity = Math.max(0, 60 - t * 20);
+    if (t < 2.6) setTimeout(decay, 50);
+    else view.scene.remove(light);
+  };
+  decay();
+}
+
 function onPlayerHealed(data) {
   if (!data || data.socketId !== game.mySocketId) return;
   game.myHealth = data.to;
@@ -1374,6 +1445,9 @@ function onKeyDown(e) {
     if (e.code === 'Digit1') useItem('flash');
     if (e.code === 'Digit2') useItem('decoy');
     if (e.code === 'Digit3') useItem('medkit');
+    if (e.code === 'Digit4') useItem('trap');
+    if (e.code === 'Digit5') useItem('smoke');
+    if (e.code === 'Digit6') useItem('emp');
   }
 }
 

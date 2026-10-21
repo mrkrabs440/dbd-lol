@@ -162,8 +162,10 @@ class GameRoom {
     this.isTest = false;
     this.testRole = null;
     this.botTimer = null;
-    // 생존자가 던진 소음 유인기
+    // 생존자가 던진 소음 유인기 / 설치한 덫 / 연막
     this.decoys = [];
+    this.traps = [];
+    this.smokes = [];
     // 맵 컨셉 랜덤 배정
     this.mapConcept = MAP_CONCEPT_IDS[Math.floor(Math.random() * MAP_CONCEPT_IDS.length)];
     this.layout = CONCEPT_LAYOUT[this.mapConcept] || CONCEPT_LAYOUT.ruins;
@@ -320,6 +322,9 @@ class RoomManager {
     // 빈사(혈실) 체크 타이머(1초 간격).
     this.bleedTimer = setInterval(() => this.tickBleedout(), 1000);
     this.bleedTimer.unref?.();
+    // 덫/연막 판정 타이머(200ms)
+    this.hazardTimer = setInterval(() => this.tickHazards(), 200);
+    this.hazardTimer.unref?.();
   }
 
   // -------------------------------------------------------------------------
@@ -511,6 +516,13 @@ class RoomManager {
     }
     if (player.health === HEALTH_STATES.DEAD) return;
 
+    if (shooter.skillDisabledUntil && shooter.skillDisabledUntil > Date.now()) {
+      socket.emit('skill:result', {
+        skill: data?.skill, ok: false, reason: 'disabled',
+        retryAfterMs: shooter.skillDisabledUntil - Date.now(),
+      });
+      return;
+    }
     const skillId = data?.skill;
     const skill = KILLER_SKILLS[skillId];
     if (!skill) {
@@ -647,6 +659,39 @@ class RoomManager {
       player.health = this.stepUpHealth(before);
       this.io.to(room.id).emit('player:healed', {
         socketId: player.socketId, from: before, to: player.health, at: now,
+      });
+    } else if (item.id === 'trap') {
+      // 자기 발밑에 덫 설치 (유효시간 20초)
+      room.traps = (room.traps || []).filter((t) => t.until > now);
+      room.traps.push({
+        position: { x: player.position.x, y: 0, z: player.position.z },
+        until: now + 20000,
+        by: player.socketId,
+      });
+      this.io.to(room.id).emit('item:used', {
+        item: item.id, by: player.socketId, position: { ...throwPos }, at: now,
+      });
+    } else if (item.id === 'smoke') {
+      room.smokes = (room.smokes || []).filter((sm) => sm.until > now);
+      room.smokes.push({
+        position: { ...throwPos },
+        until: now + item.durationMs,
+        by: player.socketId,
+      });
+      this.io.to(room.id).emit('item:used', {
+        item: item.id, by: player.socketId, position: { ...throwPos }, until: now + item.durationMs, at: now,
+      });
+    } else if (item.id === 'emp') {
+      // 살인마 스킬 8초 정지 (근거리 무관 =EMP는 전역 교란)
+      const killer = room.killer();
+      if (killer) {
+        killer.skillDisabledUntil = now + item.durationMs;
+        this.io.to(room.id).emit('player:effect', {
+          socketId: killer.socketId, effect: 'emp', until: killer.skillDisabledUntil, by: player.socketId, at: now,
+        });
+      }
+      this.io.to(room.id).emit('item:used', {
+        item: item.id, by: player.socketId, position: { ...throwPos }, until: now + item.durationMs, at: now,
       });
     }
     this.io.to(room.id).emit('room:players', room.playerList());
@@ -1342,6 +1387,52 @@ class RoomManager {
       this.checkMatchEnd(room);
     } else if (room.players.size === 0) {
       this.rooms.delete(room.id);
+    }
+  }
+
+  // 덫/연막 판정 (살인마가 밟거나 들어오면 효과 발동)
+  tickHazards() {
+    const now = Date.now();
+    for (const room of this.rooms.values()) {
+      if (room.status !== MATCH_STATES.PLAYING) continue;
+      const killer = room.killer();
+      if (!killer || !killer.alive) continue;
+
+      // 덫
+      if (room.traps && room.traps.length) {
+        room.traps = room.traps.filter((t) => t.until > now);
+        for (const trap of room.traps) {
+          const d = distance3D(killer.position, trap.position);
+          if (d > 1.8) continue;
+          if (killer.stunnedUntil && killer.stunnedUntil > now) continue; // 이미 기절 상태
+          killer.stunnedUntil = now + 1500;
+          room.traps = room.traps.filter((t) => t !== trap);
+          this.io.to(room.id).emit('player:effect', {
+            socketId: killer.socketId, effect: 'stun', until: killer.stunnedUntil, by: trap.by, at: now,
+          });
+          this.io.to(room.id).emit('item:used', {
+            item: 'trap', by: trap.by, position: { ...trap.position }, hit: true, at: now,
+          });
+          break;
+        }
+      }
+
+      // 연막: 안에 있으면 시야 차단
+      if (room.smokes && room.smokes.length) {
+        room.smokes = room.smokes.filter((sm) => sm.until > now);
+        let inSmoke = false;
+        for (const smoke of room.smokes) {
+          if (distance3D(killer.position, smoke.position) <= 6) { inSmoke = true; break; }
+        }
+        if (inSmoke) {
+          if (!killer.blindedUntil || killer.blindedUntil < now) {
+            killer.blindedUntil = now + 900;
+            this.io.to(room.id).emit('player:effect', {
+              socketId: killer.socketId, effect: 'blind', until: killer.blindedUntil, by: null, at: now,
+            });
+          }
+        }
+      }
     }
   }
 

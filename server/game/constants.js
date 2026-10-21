@@ -195,6 +195,21 @@ const SURVIVOR_ITEMS = Object.freeze({
     throwRange: 0, effectRange: 0, durationMs: 0,
     desc: '즉시 1단계 회복 (빈사→부상→건강)',
   }),
+  trap: Object.freeze({
+    id: 'trap', name: '덫', key: '4', count: 2,
+    throwRange: 0, effectRange: 1.8, durationMs: 1500,
+    desc: '바닥에 설치. 걸으면 살인마 1.5초 기절',
+  }),
+  smoke: Object.freeze({
+    id: 'smoke', name: '연막탄', key: '5', count: 1,
+    throwRange: 18, effectRange: 6, durationMs: 6000,
+    desc: '던지면 6m 내 6초간 살인마 시야 차단',
+  }),
+  emp: Object.freeze({
+    id: 'emp', name: 'EMP 무력화기', key: '6', count: 1,
+    throwRange: 0, effectRange: 30, durationMs: 8000,
+    desc: '즉시 살인마 스킬 8초 정지',
+  }),
 });
 const SURVIVOR_ITEM_LIST = Object.freeze(Object.values(SURVIVOR_ITEMS));
 const ITEM_USE_COOLDOWN_MS = 800; // 아이템 사용 쿨다운
