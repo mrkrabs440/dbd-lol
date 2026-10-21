@@ -190,7 +190,7 @@ export function animateHumanoid(h, dt, time, st = {}) {
 
   if (dead) {
     rig.pelvis.position.y = damp(rig.pelvis.position.y, 0.22, 6, dt);
-    rig.pelvis.rotation.x = damp(rig.pelvis.rotation.x, -Math.PI / 2 + 0.1, 6, dt);
+    rig.pelvis.rotation.x = damp(rig.pelvis.rotation.x, Math.PI / 2 - 0.1, 6, dt);
     rig.torso.rotation.x = damp(rig.torso.rotation.x, 0.12, 6, dt);
     rig.neck.rotation.x = damp(rig.neck.rotation.x, 0.5, 6, dt);
     for (const side of ['L', 'R']) {
@@ -237,9 +237,10 @@ export function animateHumanoid(h, dt, time, st = {}) {
     const limp = injured && s < 0 ? 0.45 : 1;
 
     rig.legs[side].hip.rotation.x = damp(rig.legs[side].hip.rotation.x, -legSin * legAmp * limp, 16, dt);
+    // 무릎은 뒤로 굽혀야 한다(+X) — 앞(모델 정면)으로 꺾이면 이상하게 보인다
     const kneeBend = Math.max(0, -legSin) * 0.9 * limp + (injured && s < 0 ? 0.25 : 0);
-    rig.legs[side].knee.rotation.x = damp(rig.legs[side].knee.rotation.x, -kneeBend, 16, dt);
-    rig.legs[side].foot.rotation.x = damp(rig.legs[side].foot.rotation.x, Math.max(0, legSin) * 0.35, 12, dt);
+    rig.legs[side].knee.rotation.x = damp(rig.legs[side].knee.rotation.x, kneeBend, 16, dt);
+    rig.legs[side].foot.rotation.x = damp(rig.legs[side].foot.rotation.x, -Math.max(0, legSin) * 0.35, 12, dt);
 
     const armSin = Math.sin(phase + Math.PI);
     if (injured && s < 0) {

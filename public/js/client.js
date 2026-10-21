@@ -1288,7 +1288,8 @@ function spawnRemotes(snapshot) {
     if (p.socketId === game.mySocketId) continue;
     const { group, body, head, human } = makePlayerMesh(p.role, p.nickname || p.email);
     group.position.set(p.position.x, 0, p.position.z);
-    group.rotation.y = p.rotation?.y || 0;
+    // 모델 정면은 로컬 -Z (카메라와 동일 방향)
+    group.rotation.y = (p.rotation?.y || 0) + Math.PI;
     // 히트 판정은 그룹 좌표를 참조한다.
     body.userData.socketId = p.socketId;
     head.userData.socketId = p.socketId;
@@ -1308,7 +1309,7 @@ function spawnRemotes(snapshot) {
       execT: 0,
       lastPos: new THREE.Vector3(p.position.x, 0, p.position.z),
       targetPos: new THREE.Vector3(p.position.x, 0, p.position.z),
-      targetYaw: p.rotation?.y || 0,
+      targetYaw: (p.rotation?.y || 0) + Math.PI,
     });
   }
 }
@@ -1902,7 +1903,7 @@ function onPlayerMoved(data) {
   if (!remote || !data.position) return;
   remote.targetPos.set(data.position.x, 0, data.position.z);
   if (typeof data.rotation?.y === 'number') {
-    remote.targetYaw = data.rotation.y;
+    remote.targetYaw = data.rotation.y + Math.PI;
   }
 }
 
