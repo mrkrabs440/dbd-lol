@@ -65,6 +65,8 @@ const els = {
   healthFill: $('health-fill'),
   staminaWrap: $('stamina-wrap'),
   staminaFill: $('stamina-fill'),
+  itemBar: $('item-bar'),
+  bleedTag: $('bleed-tag'),
   execOverlay: $('exec-overlay'),
   stunTag: $('stun-tag'),
   chaseTag: $('chase-tag'),
@@ -117,6 +119,9 @@ const game = {
   stunnedUntil: 0,
   blindedUntil: 0,
   isTest: false,
+  // 생존자 교란 아이템
+  inventory: {},
+  items: [],
   // 처형(내치기) 연출
   executing: false,
   execT: 0,
@@ -139,14 +144,14 @@ const view = {
   eyeHeight: 1.7,
   baseSpeed: 3.2,
   walkSpeed: 3.2,
-  runSpeed: 6.4,
+  runSpeed: 6.0, // 밸런스: 6.4 → 6.0
   crouchSpeed: 1.7,
   velocity: new THREE.Vector3(),
   sprinting: false,
   stamina: 100,
   staminaMax: 100,
-  staminaDrain: 22,
-  staminaRegen: 16,
+  staminaDrain: 18, // 밸런스: 22 → 18
+  staminaRegen: 14, // 밸런스: 16 → 14
   bobPhase: 0,
   bobAmount: 0,
   landShake: 0,
@@ -503,6 +508,16 @@ function connectSocket() {
   socket.on('killer:skill', onKillerSkill);
   socket.on('skill:result', onSkillResult);
   socket.on('player:effect', onPlayerEffect);
+  socket.on('item:used', onItemUsed);
+  socket.on('player:healed', onPlayerHealed);
+  // 방 정보 갱신 → 내 아이템 개수/혈실 시간 반영
+  socket.on('room:players', (list) => {
+    if (!Array.isArray(list)) return;
+    const me = list.find((p) => p.socketId === game.mySocketId);
+    if (!me) return;
+    if (me.inventory) { game.inventory = { ...me.inventory }; updateItemBar(); }
+    game.bleedOutAt = me.bleedOutAt || 0;
+  });
   socket.on('attack:missed', onAttackMissed);
   socket.on('player:damaged', onPlayerDamaged);
   socket.on('player:died', onPlayerDied);
@@ -594,8 +609,14 @@ function startMatch(snapshot) {
   view.chaseUntil = 0;
   view.blindUntil = 0;
   game.isTest = !!snapshot.isTest;
+  game.inventory = { ...(me?.inventory || {}) };
+  game.items = snapshot.rules?.items || [];
+  game.bleedOutAt = me?.bleedOutAt || 0;
+  buildItemBar();
   if (els.skillWrap) els.skillWrap.classList.toggle('hidden', !isKiller);
   if (els.staminaWrap) els.staminaWrap.classList.toggle('hidden', isKiller);
+  if (els.itemBar) els.itemBar.classList.toggle('hidden', isKiller);
+  if (els.bleedTag) els.bleedTag.classList.add('hidden');
   if (els.healthWrap) els.healthWrap.classList.toggle('hidden', isKiller);
   if (els.execOverlay) els.execOverlay.classList.add('hidden');
   updateHealthBar();
@@ -687,6 +708,70 @@ function onSkillResult(data) {
   }
 }
 
+// 아이템 사용 결과 처리
+function onItemUsed(data) {
+  if (!data) return;
+  if (data.item === 'flash') {
+    // 섬광탄 착지 지점에 섬광 이펙트
+    spawnFlashEffect(data.position);
+    if (data.hit) toast('💥 섬광탄이 살인마를 실명시켰다!');
+    else toast('💥 섬광탄 폭발 (살인마에게 안 닿음)');
+  } else if (data.item === 'decoy') {
+    spawnDecoyMarker(data.position, data.until);
+    toast('🔊 소음 유인기를 던졌다!');
+  }
+}
+function onPlayerHealed(data) {
+  if (!data || data.socketId !== game.mySocketId) return;
+  game.myHealth = data.to;
+  updateHealthUI();
+  toast('🩹 응급 키트 사용! (' + (HEALTH_LABEL[data.to] || data.to) + ')');
+}
+function spawnFlashEffect(pos) {
+  if (!pos || !view.scene) return;
+  const g = new THREE.Group();
+  const light = new THREE.PointLight(0xffffff, 40, 22, 1.4);
+  light.position.y = 1.6;
+  g.add(light);
+  const ball = new THREE.Mesh(
+    new THREE.SphereGeometry(0.35, 12, 10),
+    new THREE.MeshBasicMaterial({ color: 0xffffff })
+  );
+  ball.position.y = 0.6;
+  g.add(ball);
+  g.position.set(pos.x, 0, pos.z);
+  view.scene.add(g);
+  let t = 0;
+  const decay = () => {
+    t += 0.05;
+    light.intensity = Math.max(0, 40 - t * 22);
+    ball.scale.setScalar(1 + t * 3);
+    if (t < 1.8) setTimeout(decay, 50);
+    else { view.scene.remove(g); }
+  };
+  decay();
+}
+function spawnDecoyMarker(pos, until) {
+  if (!pos || !view.scene) return;
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(0.4, 0.6, 20),
+    new THREE.MeshBasicMaterial({ color: 0xffaa33, side: THREE.DoubleSide, transparent: true, opacity: 0.8 })
+  );
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.set(pos.x, 0.05, pos.z);
+  view.scene.add(ring);
+  const life = Math.max(0, (until - Date.now()) / 1000);
+  let t = 0;
+  const decay = () => {
+    t += 0.05;
+    ring.scale.setScalar(1 + Math.sin(t * 6) * 0.25);
+    ring.material.opacity = Math.max(0, 0.8 * (1 - t / Math.max(0.1, life)));
+    if (t < life) setTimeout(decay, 50);
+    else view.scene.remove(ring);
+  };
+  decay();
+}
+
 function onPlayerEffect(data) {
   if (!data) return;
   if (data.socketId !== game.mySocketId) return;
@@ -721,6 +806,13 @@ function updateStaminaUI() {
 
 function updateEffectUI() {
   const now = Date.now();
+  // 빈사(혈실) 카운트다운
+  if (els.bleedTag) {
+    if (game.myHealth === 'dying' && game.bleedOutAt > now) {
+      els.bleedTag.classList.remove('hidden');
+      els.bleedTag.textContent = `🩸 혈실 ${Math.ceil((game.bleedOutAt - now) / 1000)}초`;
+    } else els.bleedTag.classList.add('hidden');
+  }
   // 암전 오버레이
   const blinded = game.blindedUntil > now;
   if (els.blindOverlay) els.blindOverlay.classList.toggle('hidden', !blinded);
@@ -1252,7 +1344,8 @@ function updateRemotes(dt, time) {
     } else {
       animateHumanoid(remote.human, dt, time, {
         speed: remote.speed,
-        running: remote.speed > 4.6,
+        // 봇 추격속도(4.9)도 달리기로 판정되도록 기준 하향
+        running: remote.speed > 4.0,
         health,
         dead,
         down,
@@ -1273,6 +1366,11 @@ function onKeyDown(e) {
     if (e.code === 'KeyQ') useSkill('chase');
     if (e.code === 'KeyF') useSkill('terror');
     if (e.code === 'KeyE') useSkill('dark');
+  }
+  if (game.role === 'survivor' && !e.repeat) {
+    if (e.code === 'Digit1') useItem('flash');
+    if (e.code === 'Digit2') useItem('decoy');
+    if (e.code === 'Digit3') useItem('medkit');
   }
 }
 
@@ -1301,6 +1399,7 @@ function tick() {
   updateCooldownUI();
   updateSkillUI();
   updateEffectUI();
+  updateItemBar();
   updateHealthBar();
   updateStaminaUI();
   updateRemotes(dt, time);
@@ -1549,6 +1648,45 @@ function renderGeneratorList() {
       : `발전기 ${gen.index + 1}: ${Math.floor(gen.progress)}%`;
     els.generators.append(li);
   }
+}
+
+// ------------------------------------------------
+// 생존자 교란 아이템 바
+// ------------------------------------------------
+function buildItemBar() {
+  const bar = els.itemBar;
+  if (!bar) return;
+  bar.innerHTML = '';
+  for (const item of game.items || []) {
+    const count = game.inventory[item.id] || 0;
+    const btn = document.createElement('div');
+    btn.className = 'item-btn' + (count > 0 ? '' : ' empty');
+    btn.dataset.item = item.id;
+    btn.innerHTML = `<span class="item-key">${item.key}</span><span class="item-name">${item.name}</span><span class="item-count">x${count}</span><span class="item-desc">${item.desc}</span>`;
+    bar.appendChild(btn);
+  }
+}
+function updateItemBar() {
+  const bar = els.itemBar;
+  if (!bar) return;
+  for (const btn of bar.querySelectorAll('.item-btn')) {
+    const id = btn.dataset.item;
+    const count = game.inventory[id] || 0;
+    btn.classList.toggle('empty', count <= 0);
+    const c = btn.querySelector('.item-count');
+    if (c) c.textContent = 'x' + count;
+  }
+}
+function useItem(id) {
+  if (!game.active || game.role !== 'survivor') return;
+  if ((game.inventory[id] || 0) <= 0) { toast('아이템이 없습니다.'); return; }
+  // 던지는 방향(카메라 정면)
+  const dir = new THREE.Vector3();
+  view.camera.getWorldDirection(dir);
+  dir.y = 0;
+  if (dir.lengthSq() < 0.0001) dir.set(0, 0, -1);
+  dir.normalize();
+  net.socket?.emit('item:use', { item: id, dx: dir.x, dz: dir.z });
 }
 
 function updateObjective() {

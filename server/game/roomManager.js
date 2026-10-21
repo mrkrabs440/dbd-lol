@@ -36,12 +36,17 @@ const {
   CHASE_SPEED_MULTIPLIER,
   TEST_MODE_ROLES,
   TEST_BOT_SPEED,
+  TEST_BOT_RUN_SPEED,
   TEST_BOT_TICK_MS,
   TEST_SURVIVOR_NAMES,
   TEST_KILLER_NAME,
   MAP_CONCEPT_IDS,
   CONCEPT_LAYOUT,
   SURVIVOR_SPRINT_MAX_SPEED,
+  SURVIVOR_ITEMS,
+  SURVIVOR_ITEM_LIST,
+  ITEM_USE_COOLDOWN_MS,
+  BLEED_OUT_MS,
 } = require('./constants');
 
 // 매치 제한 시간(10분). 초과 시 살인마 승리로 종료한다.
@@ -157,6 +162,8 @@ class GameRoom {
     this.isTest = false;
     this.testRole = null;
     this.botTimer = null;
+    // 생존자가 던진 소음 유인기
+    this.decoys = [];
     // 맵 컨셉 랜덤 배정
     this.mapConcept = MAP_CONCEPT_IDS[Math.floor(Math.random() * MAP_CONCEPT_IDS.length)];
     this.layout = CONCEPT_LAYOUT[this.mapConcept] || CONCEPT_LAYOUT.ruins;
@@ -173,6 +180,13 @@ class GameRoom {
         completedAt: null,
       });
     });
+  }
+
+  // 생존자 기본 아이템(테스트 봇은 없음)
+  defaultInventory() {
+    const inv = {};
+    for (const item of SURVIVOR_ITEM_LIST) inv[item.id] = item.count;
+    return inv;
   }
 
   addPlayer(player) {
@@ -214,6 +228,25 @@ class GameRoom {
     return [...this.generators.values()].every((g) => g.completed);
   }
 
+  // 클라이언트용 간단 플레이어 목록(room:players 이벤트)
+  playerList() {
+    return [...this.players.values()].map((p) => ({
+      socketId: p.socketId,
+      userId: p.userId,
+      nickname: p.nickname,
+      role: p.role,
+      health: p.health,
+      escaped: p.escaped,
+      kills: p.kills,
+      deaths: p.deaths,
+      position: { ...p.position },
+      rotation: { ...p.rotation },
+      inventory: { ...(p.inventory || {}) },
+      bleedOutAt: p.bleedOutAt || 0,
+      skillCooldowns: { ...(p.skillCooldowns || {}) },
+    }));
+  }
+
   // 클라이언트 초기화에 필요한 전체 스냅샷.
   toMatchSnapshot() {
     return {
@@ -236,6 +269,8 @@ class GameRoom {
         blindedUntil: p.blindedUntil || 0,
         skillCooldowns: { ...(p.skillCooldowns || {}) },
         chaseUntil: p.chaseUntil || 0,
+        inventory: { ...(p.inventory || {}) },
+        bleedOutAt: p.bleedOutAt || 0,
       })),
       generators: [...this.generators.values()].map((g) => ({
         id: g.id,
@@ -255,6 +290,7 @@ class GameRoom {
         survivors: SURVIVORS_PER_MATCH,
         killers: KILLERS_PER_MATCH,
         repairRatePerSec: REPAIR_RATE_PER_SEC,
+        items: SURVIVOR_ITEM_LIST,
         attackRange: ATTACK_RANGE,
         attackCooldownMs: ATTACK_COOLDOWN_MS,
         interactRange: INTERACT_RANGE,
@@ -281,6 +317,9 @@ class RoomManager {
     // 좀비 방 정리 타이머(60초 간격).
     this.cleanupTimer = setInterval(() => this.cleanupStaleRooms(), 60 * 1000);
     this.cleanupTimer.unref?.();
+    // 빈사(혈실) 체크 타이머(1초 간격).
+    this.bleedTimer = setInterval(() => this.tickBleedout(), 1000);
+    this.bleedTimer.unref?.();
   }
 
   // -------------------------------------------------------------------------
@@ -543,6 +582,84 @@ class RoomManager {
   }
 
   // -------------------------------------------------------------------------
+  // 생존자 교란 아이템 사용 (서버 검증)
+  // -------------------------------------------------------------------------
+  handleItemUse(socket, data) {
+    const room = this.getRoomBySocket(socket.id);
+    if (!room || room.status !== MATCH_STATES.PLAYING) return;
+    const player = room.getPlayer(socket.id);
+    if (!player || player.role !== ROLES.SURVIVOR) {
+      socket.emit('error:message', { code: 'NOT_SURVIVOR', message: '생존자만 사용할 수 있습니다.' });
+      return;
+    }
+    if (player.health === HEALTH_STATES.DEAD || player.escaped) return;
+
+    const item = SURVIVOR_ITEMS[data?.item];
+    if (!item) return;
+    player.inventory = player.inventory || {};
+    if ((player.inventory[item.id] || 0) <= 0) {
+      socket.emit('error:message', { code: 'NO_ITEM', message: `${item.name}이(가) 없습니다.` });
+      return;
+    }
+    const now = Date.now();
+    if (player.itemCdUntil && now < player.itemCdUntil) return;
+    player.itemCdUntil = now + ITEM_USE_COOLDOWN_MS;
+
+    // 던질 위치 계산(서버가 사거리/맵범위 검증)
+    const throwPos = { x: player.position.x, y: 0, z: player.position.z };
+    if (item.throwRange > 0) {
+      const dx = Number(data?.dx) || 0;
+      const dz = Number(data?.dz) || 0;
+      const len = Math.hypot(dx, dz);
+      const nx = len > 0.0001 ? dx / len : 0;
+      const nz = len > 0.0001 ? dz / len : 0;
+      throwPos.x = Math.max(-MAP_HALF_EXTENT, Math.min(MAP_HALF_EXTENT, throwPos.x + nx * item.throwRange));
+      throwPos.z = Math.max(-MAP_HALF_EXTENT, Math.min(MAP_HALF_EXTENT, throwPos.z + nz * item.throwRange));
+    }
+
+    player.inventory[item.id] = (player.inventory[item.id] || 0) - 1;
+
+    if (item.id === 'flash') {
+      // 반경 내 살인마 실명
+      const killer = room.killer();
+      let hit = false;
+      if (killer && killer.alive) {
+        const d = distance3D(throwPos, killer.position);
+        if (d <= item.effectRange) {
+          killer.blindedUntil = now + item.durationMs;
+          hit = true;
+          this.io.to(room.id).emit('player:effect', {
+            socketId: killer.socketId, effect: 'blind', until: killer.blindedUntil, by: player.socketId, at: now,
+          });
+        }
+      }
+      this.io.to(room.id).emit('item:used', {
+        item: item.id, by: player.socketId, position: { ...throwPos }, hit, at: now,
+      });
+    } else if (item.id === 'decoy') {
+      room.decoys = (room.decoys || []).filter((d) => d.until > now);
+      room.decoys.push({ position: { ...throwPos }, until: now + item.durationMs });
+      this.io.to(room.id).emit('item:used', {
+        item: item.id, by: player.socketId, position: { ...throwPos }, until: now + item.durationMs, at: now,
+      });
+    } else if (item.id === 'medkit') {
+      const before = player.health;
+      player.health = this.stepUpHealth(before);
+      this.io.to(room.id).emit('player:healed', {
+        socketId: player.socketId, from: before, to: player.health, at: now,
+      });
+    }
+    this.io.to(room.id).emit('room:players', room.playerList());
+  }
+
+  // 1단계 회복(빈사→부상→건강)
+  stepUpHealth(current) {
+    if (current === HEALTH_STATES.DYING) return HEALTH_STATES.INJURED;
+    if (current === HEALTH_STATES.INJURED) return HEALTH_STATES.HEALTHY;
+    return current;
+  }
+
+  // -------------------------------------------------------------------------
   // 싱글 테스트 모드: 봇으로 채운 방 즉시 생성
   // -------------------------------------------------------------------------
   createTestMatch(socket, requestedRole) {
@@ -590,6 +707,9 @@ class RoomManager {
       connected: true,
       skillCooldowns: {},
       isBot: false,
+      inventory: room.defaultInventory(),
+      itemCdUntil: 0,
+      bleedOutAt: 0,
     });
     this.socketRoomId.set(socket.id, roomId);
     try {
@@ -634,6 +754,9 @@ class RoomManager {
         connected: true,
         skillCooldowns: {},
         isBot: true,
+        inventory: {},
+        itemCdUntil: 0,
+        bleedOutAt: 0,
         // 봇 AI용 상태
         wanderTarget: {
           x: (Math.random() - 0.5) * 40,
@@ -684,14 +807,28 @@ class RoomManager {
       if (!bot.isBot || bot.escaped || bot.health === HEALTH_STATES.DEAD) continue;
 
       let target = null;
+      let runMode = false;
       if (bot.role === ROLES.KILLER) {
-        // 봇 살인마: 가장 가까운 생존자를 추적한다.
+        // 봇 살인마: 가장 가까운 생존자 추격. 단, 멀리 있으면 소음 유인기를 따라간다.
         let bestD = Infinity;
         for (const other of room.players.values()) {
           if (other.role !== ROLES.SURVIVOR || other.escaped || other.health === HEALTH_STATES.DEAD) continue;
           const d = distance3D(bot.position, other.position);
           if (d < bestD) { bestD = d; target = other; }
         }
+        const now2 = Date.now();
+        let decoy = null;
+        let decoyD = Infinity;
+        for (const d of (room.decoys || [])) {
+          if (!d || d.until <= now2) continue;
+          const dd = distance3D(bot.position, d.position);
+          if (dd < decoyD) { decoyD = dd; decoy = d; }
+        }
+        if (decoy && bestD > 14) {
+          target = { position: decoy.position, isDecoy: true };
+          bestD = decoyD;
+        }
+        runMode = true;
       } else {
         // 봇 생존자: 발전기를 수리하러 이동한다(가끔).
         if (!bot.repairTargetId || room.generators.get(bot.repairTargetId)?.completed) {
@@ -709,8 +846,10 @@ class RoomManager {
         const dz = target.position.z - bot.position.z;
         const dist = Math.hypot(dx, dz);
         if (dist > (bot.role === ROLES.KILLER ? 1.2 : 1.6)) {
-          moveX = (dx / dist) * TEST_BOT_SPEED * dt;
-          moveZ = (dz / dist) * TEST_BOT_SPEED * dt;
+          // 추격/유인 중엔 빠르게(달리기), 평상시엔 걷기
+          const spd = runMode ? TEST_BOT_RUN_SPEED : TEST_BOT_SPEED;
+          moveX = (dx / dist) * spd * dt;
+          moveZ = (dz / dist) * spd * dt;
         }
         bot.rotation = { x: 0, y: Math.atan2(-dx, -dz), z: 0 };
       } else {
@@ -1123,9 +1262,14 @@ class RoomManager {
     console.log(`[Match] 종료 ${room.id} (승자=${winner}, 사유=${reason})`);
 
     // 전적 반영은 비동기로 처리하고 게임 종료 응답을 지연시키지 않는다.
-    this.persistMatchResults(players).catch((err) => {
-      console.error(`[Match] 전적 저장 실패 ${room.id}:`, err.message);
-    });
+    // ★ 테스트 모드는 전적에 반영하지 않는다 ★
+    if (!room.isTest) {
+      this.persistMatchResults(players).catch((err) => {
+        console.error(`[Match] 전적 저장 실패 ${room.id}:`, err.message);
+      });
+    } else {
+      console.log(`[Match] 테스트 매치 ${room.id} — 전적 미반영`);
+    }
 
     this.stopBotLoop(room);
 
@@ -1198,6 +1342,28 @@ class RoomManager {
       this.checkMatchEnd(room);
     } else if (room.players.size === 0) {
       this.rooms.delete(room.id);
+    }
+  }
+
+  // 빈사 상태로 오래 방치되면 사망(혈실)
+  tickBleedout() {
+    const now = Date.now();
+    for (const room of this.rooms.values()) {
+      if (room.status !== MATCH_STATES.PLAYING) continue;
+      for (const p of room.players.values()) {
+        if (p.role !== ROLES.SURVIVOR) continue;
+        if (p.escaped || p.health !== HEALTH_STATES.DYING) continue;
+        if (!p.bleedOutAt) p.bleedOutAt = now + BLEED_OUT_MS;
+        if (now < p.bleedOutAt) continue;
+        p.health = HEALTH_STATES.DEAD;
+        p.alive = false;
+        p.deaths += 1;
+        this.io.to(room.id).emit('player:died', {
+          socketId: p.socketId, by: null, reason: 'bleedout', at: now,
+        });
+        this.io.to(room.id).emit('room:players', room.playerList());
+        this.checkMatchEnd(room);
+      }
     }
   }
 

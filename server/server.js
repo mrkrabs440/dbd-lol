@@ -237,6 +237,9 @@ io.on('connection', (socket) => {
   socket.on('killer_skill', (data) => roomManager.handleKillerSkill(socket, data));
   socket.on('skill:use', (data) => roomManager.handleKillerSkill(socket, data));
 
+  // --- 생존자 교란 아이템 ---
+  socket.on('item:use', (data) => roomManager.handleItemUse(socket, data));
+
   // 탈출 요청(모든 발전기 완료 후 게이트 근처에서 전송).
   socket.on('player:escape', () => roomManager.handleEscape(socket));
 

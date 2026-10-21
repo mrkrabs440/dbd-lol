@@ -38,11 +38,18 @@ const REPAIR_RATE_PER_SEC = 5; // 초당 5% (요구 명세)
 const REPAIR_TICK_MS = 100; // 서버 검증 틱 간격
 
 // --- 이동/전투 ---
+// ★ 밸런스 패치 v1 (2026-10-21) ★
+//   살인마가 너무 강해 생존자가 수리를 못 끝냈음 → 살인마 약화 + 생존자 보강
 const SURVIVOR_SPEED = 4; // 클라이언트 기준(단위/초)
-const KILLER_SPEED_MULTIPLIER = 1.25; // 살인마 이동 속도 배수
-const ATTACK_RANGE = 4; // 공격 사거리(요구 명세: Raycaster 4)
-const ATTACK_COOLDOWN_MS = 2500; // 공격 쿨다운
+const SURVIVOR_RUN_SPEED = 6.0; // 생존자 달리기 속도 (6.4 → 6.0, 스태미나 부담 ↓)
+const SURVIVOR_STAMINA_DRAIN = 18; // 초당 스태미나 소모 (22 → 18)
+const SURVIVOR_STAMINA_REGEN = 14; // 초당 스태미나 회복 (16 → 14)
+const KILLER_SPEED_MULTIPLIER = 1.18; // 살인마 이동 속도 배수 (1.25 → 1.18)
+const ATTACK_RANGE = 4.5; // 공격 사거리 (4 → 4.5)
+const ATTACK_COOLDOWN_MS = 2800; // 공격 쿨다운 (2500 → 2800)
 const INTERACT_RANGE = 3; // 상호작용(수리) 사거리
+const REPAIR_RATE_PER_SEC_BALANCE = 6; // 발전기 수리 속도 (5 → 6)
+const BLEED_OUT_MS = 45000; // 빈사 상태 방치 시 사망(혈실) 시간
 
 // --- 맵 경계 (서버 측 위치 검증) ---
 const MAP_HALF_EXTENT = 30; // -30 ~ +30 (60x60)
@@ -118,7 +125,8 @@ const TEST_MODE_ROLES = Object.freeze({
   KILLER: 'killer',
   SURVIVOR: 'survivor',
 });
-const TEST_BOT_SPEED = 3.0;
+const TEST_BOT_SPEED = 2.8;      // 봇 걷기 속도
+const TEST_BOT_RUN_SPEED = 4.9;   // 봇 달리기(추격/유인) 속도
 const TEST_BOT_TICK_MS = 400;
 const TEST_SURVIVOR_NAMES = Object.freeze(['BOT_훈련병', 'BOT_복사본', 'BOT_신병']);
 const TEST_KILLER_NAME = 'BOT_살인마';
@@ -169,6 +177,28 @@ const CONCEPT_LAYOUT = Object.freeze({
 // 생존자 달리기 최대 속도(서버 검증용). 클라가 sprint 플래그를 보내면 더 허용.
 const SURVIVOR_SPRINT_MAX_SPEED = 7.2;
 
+// --- 생존자 교란 아이템 ---
+// 살인마를 방해/유인/회복하는 생존자 전용 소모품
+const SURVIVOR_ITEMS = Object.freeze({
+  flash: Object.freeze({
+    id: 'flash', name: '섬광탄', key: '1', count: 2,
+    throwRange: 20, effectRange: 10, durationMs: 3000,
+    desc: '던지면 10m 내 살인마 3초 실명',
+  }),
+  decoy: Object.freeze({
+    id: 'decoy', name: '소음 유인기', key: '2', count: 1,
+    throwRange: 26, effectRange: 0, durationMs: 12000,
+    desc: '던지면 12초간 살인마가 그 소리로',
+  }),
+  medkit: Object.freeze({
+    id: 'medkit', name: '응급 키트', key: '3', count: 1,
+    throwRange: 0, effectRange: 0, durationMs: 0,
+    desc: '즉시 1단계 회복 (빈사→부상→건강)',
+  }),
+});
+const SURVIVOR_ITEM_LIST = Object.freeze(Object.values(SURVIVOR_ITEMS));
+const ITEM_USE_COOLDOWN_MS = 800; // 아이템 사용 쿨다운
+
 // --- 승패 판정 ---
 // 모든 생존자가 (탈출 또는 사망) 으로 정리되면 매치 종료.
 // 탈출자가 1명 이상이면 생존자 승, 아니면 살인마 승.
@@ -182,6 +212,13 @@ module.exports = {
   GENERATORS_PER_MATCH,
   REPAIR_RATE_PER_SEC,
   REPAIR_TICK_MS,
+  SURVIVOR_RUN_SPEED,
+  SURVIVOR_STAMINA_DRAIN,
+  SURVIVOR_STAMINA_REGEN,
+  BLEED_OUT_MS,
+  SURVIVOR_ITEMS,
+  SURVIVOR_ITEM_LIST,
+  ITEM_USE_COOLDOWN_MS,
   SURVIVOR_SPEED,
   KILLER_SPEED_MULTIPLIER,
   ATTACK_RANGE,
@@ -201,6 +238,7 @@ module.exports = {
   CHASE_SPEED_MULTIPLIER,
   TEST_MODE_ROLES,
   TEST_BOT_SPEED,
+  TEST_BOT_RUN_SPEED,
   TEST_BOT_TICK_MS,
   TEST_SURVIVOR_NAMES,
   TEST_KILLER_NAME,
