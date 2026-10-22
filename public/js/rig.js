@@ -157,9 +157,21 @@ export function makeHumanoid(role, nickname, palette = {}) {
     arms.R.elbow.add(weapon);
   }
 
+  // --- 레이캐스트용 히트박스 ---
+  // 관절은 Group라 raycast 에 걸리지 않는다 → 별도 Mesh 를 만든다(렌더는 안 함)
+  const hitMat = new THREE.MeshBasicMaterial({ visible: false });
+  const bodyHit = new THREE.Mesh(new THREE.BoxGeometry(0.56, 1.55, 0.42), hitMat);
+  bodyHit.position.set(0, 0.24, 0);
+  bodyHit.userData = { part: 'body' };
+  torso.add(bodyHit);
+  const headHit = new THREE.Mesh(new THREE.SphereGeometry(0.23, 12, 10), hitMat);
+  headHit.position.set(0, 0.12, 0);
+  headHit.userData = { part: 'head' };
+  head.add(headHit);
+
   return {
     group,
-    rig: { pelvis, torso, neck, head, arms, legs },
+    rig: { pelvis, torso, neck, head, arms, legs, bodyHit, headHit },
     role,
     phase: Math.random() * Math.PI * 2,
     speed: 0,

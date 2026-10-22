@@ -1344,8 +1344,9 @@ function makePlayerMesh(role, nickname) {
   const group = human.group;
 
   // 히트 판정용 박스(머리/몸통) — 리그에 맞춰 위치 갱신
-  const head = human.rig.head;
-  const body = human.rig.torso;
+  // 레이캐스트는 Mesh 히트박스를 사용해야 한다(Group는 raycast 안 됨)
+  const head = human.rig.headHit;
+  const body = human.rig.bodyHit;
 
   const label = makeLabelSprite(nickname || (isKiller ? '살인마' : '생존자'), glowColor);
   label.position.y = isKiller ? 2.75 : 2.45;
